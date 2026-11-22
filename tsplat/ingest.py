@@ -6,6 +6,7 @@ TeslaCam layout on the drive:
   TeslaCam/SentryClips/<event>/...
 Cameras: front, back, left_repeater, right_repeater, left_pillar, right_pillar (pillars: HW4).
 """
+
 from __future__ import annotations
 
 import json
@@ -20,7 +21,8 @@ CLIP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(" + "|".join(CAMS)
 
 
 def find_teslacam() -> Path | None:
-    for vol in Path("/Volumes").iterdir():
+    vols = Path("/Volumes")  # macOS mount point; pass --src elsewhere
+    for vol in vols.iterdir() if vols.is_dir() else []:
         if (vol / "TeslaCam").is_dir():
             return vol / "TeslaCam"
     return None
@@ -31,12 +33,20 @@ def copy(src: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     if shutil.which("rsync"):
         subprocess.run(
-            ["rsync", "-a", "--include=*/", "--include=*.mp4",
-             "--include=event.json", "--exclude=*", f"{src}/", f"{dest}/"],
+            [
+                "rsync",
+                "-a",
+                "--include=*/",
+                "--include=*.mp4",
+                "--include=event.json",
+                "--exclude=*",
+                f"{src}/",
+                f"{dest}/",
+            ],
             check=True,
         )
     else:
-        for f in src.rglob("*.mp4"):
+        for f in [*src.rglob("*.mp4"), *src.rglob("event.json")]:
             out = dest / f.relative_to(src)
             if not out.exists():
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +56,8 @@ def copy(src: Path, dest: Path) -> None:
 def duration(path: Path) -> float:
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     try:
         return float(r.stdout.strip())
@@ -57,7 +68,7 @@ def duration(path: Path) -> float:
 def build_index(root: Path) -> list[dict]:
     """Group per-camera files into clips keyed by (folder, timestamp)."""
     groups: dict[tuple[str, str], dict] = defaultdict(dict)
-    for f in sorted(root.rglob("*.mp4")):
+    for f in sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mp4"):
         m = CLIP_RE.search(f.name)
         if m:
             groups[(str(f.parent), m.group(1))][m.group(2).lower()] = f
@@ -71,14 +82,16 @@ def build_index(root: Path) -> list[dict]:
                 event = json.loads(ev.read_text())
             except json.JSONDecodeError:
                 pass
-        clips.append({
-            "id": f"{ts}" if kind == "RecentClips" else f"{Path(folder).name}/{ts}",
-            "timestamp": ts,
-            "kind": kind,
-            "seconds": round(duration(cams["front"]), 2) if "front" in cams else None,
-            "cams": {c: str(p) for c, p in sorted(cams.items(), key=lambda kv: CAMS.index(kv[0]))},
-            "event": event,
-        })
+        clips.append(
+            {
+                "id": f"{ts}" if kind == "RecentClips" else f"{Path(folder).name}/{ts}",
+                "timestamp": ts,
+                "kind": kind,
+                "seconds": round(duration(cams["front"]), 2) if "front" in cams else None,
+                "cams": {c: str(p) for c, p in sorted(cams.items(), key=lambda kv: CAMS.index(kv[0]))},
+                "event": event,
+            }
+        )
     return clips
 
 

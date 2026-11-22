@@ -4,6 +4,7 @@ Port of teslamotors/dashcam sei_extractor.py with a tiny built-in protobuf decod
 so no protoc / protobuf dependency is needed. Field numbers follow dashcam.proto.
 Requires firmware 2025.44.25+ on HW3/HW4; parked clips may have no SEI.
 """
+
 from __future__ import annotations
 
 import json
@@ -144,7 +145,9 @@ def extract(path: str | Path) -> list[dict]:
             meta = decode_proto(p) if p else None
             if meta and "frame_seq_no" in meta:
                 meta["gear"] = GEARS[meta.get("gear_state", 0)] if meta.get("gear_state", 0) < 4 else "?"
-                meta["autopilot"] = AUTOPILOT[meta.get("autopilot_state", 0)] if meta.get("autopilot_state", 0) < 4 else "?"
+                meta["autopilot"] = (
+                    AUTOPILOT[meta.get("autopilot_state", 0)] if meta.get("autopilot_state", 0) < 4 else "?"
+                )
                 rows.append(meta)
     return rows
 

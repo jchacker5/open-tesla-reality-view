@@ -12,6 +12,19 @@ movers = ["ultralytics>=8.3"]
 otrv = "tsplat.__main__:main"
 tsplat = "tsplat.__main__:main"
 
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["tsplat"]
 

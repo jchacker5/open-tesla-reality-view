@@ -8,6 +8,7 @@ work/<name>/
   viewer/cams/<cam>.mp4      trimmed, downscaled clips for the side panel
   viewer/telemetry.json      SEI speed/GPS/steering at 10 Hz (if the clip has it)
 """
+
 from __future__ import annotations
 
 import io
@@ -44,6 +45,8 @@ NEIGHBOURS_4CAM = {
 def neighbours(cams: list[str]) -> dict[str, list[str]]:
     table = NEIGHBOURS if {"left_pillar", "right_pillar"} & set(cams) else NEIGHBOURS_4CAM
     return {c: [n for n in table.get(c, []) if n in cams] for c in cams}
+
+
 # Approximate camera layout (yaw degrees, right = +; position metres in the front camera's frame:
 # x right, y down, z forward). Only a starting point: COLMAP refines it.
 RIG = {
@@ -63,8 +66,22 @@ def ff(*args: str) -> None:
 
 def video_fps(path: str) -> float:
     r = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate",
-         "-of", "csv=p=0", path], capture_output=True, text=True, check=True)
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     num, _, den = r.stdout.strip().partition("/")
     return float(num) / float(den or 1)
 
@@ -73,21 +90,33 @@ def extract_frames(cams: dict, out: Path, start: float, dur: float, fps: float, 
     for cam, path in cams.items():
         d = out / "images" / cam
         d.mkdir(parents=True, exist_ok=True)
-        ff("-ss", str(start), "-t", str(dur), "-i", path,
-           "-vf", f"fps={fps},scale='min({width},iw)':-2", "-q:v", "2", "-start_number", "0",
-           str(d / "%05d.jpg"))
+        ff(
+            "-ss",
+            str(start),
+            "-t",
+            str(dur),
+            "-i",
+            path,
+            "-vf",
+            f"fps={fps},scale='min({width},iw)':-2",
+            "-q:v",
+            "2",
+            "-start_number",
+            "0",
+            str(d / "%05d.jpg"),
+        )
 
 
 def _body_region(cam: str, h: int, w: int) -> np.ndarray:
     """Where the car's own body can appear in each camera (keeps sky out of the mask)."""
     region = np.zeros((h, w), bool)
     if cam == "back":
-        region[int(h * 0.60):] = True
+        region[int(h * 0.60) :] = True
     elif cam in ("left_pillar", "right_pillar", "front"):
-        region[int(h * 0.80):] = True
+        region[int(h * 0.80) :] = True
     elif cam in ("left_repeater", "right_repeater"):  # body hugs one side edge; check both
-        region[int(h * 0.15):, : int(w * 0.25)] = True
-        region[int(h * 0.15):, int(w * 0.75):] = True
+        region[int(h * 0.15) :, : int(w * 0.25)] = True
+        region[int(h * 0.15) :, int(w * 0.75) :] = True
     return region
 
 
@@ -116,8 +145,25 @@ def build_ego_masks(index: str, out_dir: str, max_clips: int = 40) -> None:
             continue
         stack, size = [], None
         for src in srcs:
-            r = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", "20", "-i", src, "-frames:v", "1",
-                                "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True)
+            r = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    "20",
+                    "-i",
+                    src,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "image2pipe",
+                    "-vcodec",
+                    "png",
+                    "-",
+                ],
+                capture_output=True,
+            )
             if not r.stdout:
                 continue
             im = Image.open(io.BytesIO(r.stdout))
@@ -158,7 +204,7 @@ def mover_masks(images: list[Path]):
         h, w = res.orig_shape
         m = np.full((h, w), 255, np.uint8)
         if res.masks is not None:
-            for cls, mk in zip(res.boxes.cls.tolist(), res.masks.data.cpu().numpy()):
+            for cls, mk in zip(res.boxes.cls.tolist(), res.masks.data.cpu().numpy(), strict=False):
                 if int(cls) in MOVER_CLASSES:
                     m[mk > 0.5] = 0
         yield img, m
@@ -223,9 +269,30 @@ def write_viewer_assets(cams: dict, out: Path, start: float, dur: float) -> None
     vd = out / "viewer" / "cams"
     vd.mkdir(parents=True, exist_ok=True)
     for cam, path in cams.items():
-        ff("-ss", str(start), "-t", str(dur), "-i", path, "-an", "-vf", "scale=640:-2",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-g", "15", "-pix_fmt", "yuv420p",
-           "-movflags", "+faststart", str(vd / f"{cam}.mp4"))
+        ff(
+            "-ss",
+            str(start),
+            "-t",
+            str(dur),
+            "-i",
+            path,
+            "-an",
+            "-vf",
+            "scale=640:-2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "26",
+            "-g",
+            "15",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(vd / f"{cam}.mp4"),
+        )
 
     rows = sei.extract(cams["front"]) if "front" in cams else []
     tel = []
@@ -237,21 +304,36 @@ def write_viewer_assets(cams: dict, out: Path, start: float, dur: float) -> None
             t = (r["frame_seq_no"] - seq0) / fps - start
             if 0 <= t <= dur and t - last >= 0.1:
                 last = t
-                tel.append({
-                    "t": round(t, 2),
-                    "mph": round(r.get("vehicle_speed_mps", 0) * 2.23694, 1),
-                    "lat": r.get("latitude_deg"), "lon": r.get("longitude_deg"),
-                    "heading": r.get("heading_deg"), "steer": r.get("steering_wheel_angle"),
-                    "gear": r.get("gear"), "autopilot": r.get("autopilot"),
-                    "brake": r.get("brake_applied", False),
-                    "blinkL": r.get("blinker_on_left", False), "blinkR": r.get("blinker_on_right", False),
-                })
+                tel.append(
+                    {
+                        "t": round(t, 2),
+                        "mph": round(r.get("vehicle_speed_mps", 0) * 2.23694, 1),
+                        "lat": r.get("latitude_deg"),
+                        "lon": r.get("longitude_deg"),
+                        "heading": r.get("heading_deg"),
+                        "steer": r.get("steering_wheel_angle"),
+                        "gear": r.get("gear"),
+                        "autopilot": r.get("autopilot"),
+                        "brake": r.get("brake_applied", False),
+                        "blinkL": r.get("blinker_on_left", False),
+                        "blinkR": r.get("blinker_on_right", False),
+                    }
+                )
     (out / "viewer" / "telemetry.json").write_text(json.dumps(tel))
     print(f"telemetry: {len(tel)} samples" if tel else "telemetry: none in this clip (needs fw 2025.44.25+)")
 
 
-def run(index: str, clip_id: str, name: str, start: float, dur: float, fps: float,
-        width: int, movers: bool, workdir: str = "work") -> Path:
+def run(
+    index: str,
+    clip_id: str,
+    name: str,
+    start: float,
+    dur: float,
+    fps: float,
+    width: int,
+    movers: bool,
+    workdir: str = "work",
+) -> Path:
     clips = json.loads(Path(index).read_text())
     clip = next((c for c in clips if c["id"] == clip_id or c["timestamp"] == clip_id), None)
     if not clip:
@@ -267,7 +349,17 @@ def run(index: str, clip_id: str, name: str, start: float, dur: float, fps: floa
     print(f"pairs: {write_pairs(out, list(cams))}")
     write_rig_config(out, list(cams))
     write_viewer_assets(cams, out, start, dur)
-    (out / "meta.json").write_text(json.dumps(
-        {"clip": clip["id"], "timestamp": clip["timestamp"], "start": start, "dur": dur, "fps": fps,
-         "cams": list(cams)}, indent=1))
+    (out / "meta.json").write_text(
+        json.dumps(
+            {
+                "clip": clip["id"],
+                "timestamp": clip["timestamp"],
+                "start": start,
+                "dur": dur,
+                "fps": fps,
+                "cams": list(cams),
+            },
+            indent=1,
+        )
+    )
     return out

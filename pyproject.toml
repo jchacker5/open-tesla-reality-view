@@ -1,0 +1,20 @@
+[project]
+name = "open-tesla-reality-view"
+version = "0.1.0"
+description = "Tesla 6-camera dashcam -> 3D Gaussian splat replay"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "pillow>=10", "scipy>=1.11"]
+
+[project.optional-dependencies]
+movers = ["ultralytics>=8.3"]
+
+[project.scripts]
+otrv = "tsplat.__main__:main"
+tsplat = "tsplat.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tsplat"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

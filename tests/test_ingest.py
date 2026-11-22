@@ -60,3 +60,15 @@ def test_build_index(teslacam):
 def test_run_index_only_writes_index(teslacam):
     out = ingest.run(None, str(teslacam), index_only=True)
     assert len(json.loads(out.read_text())) == 5
+
+
+def test_build_index_ignores_appledouble_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest, "duration", lambda p: 60.0)
+    recent = tmp_path / "RecentClips"
+    recent.mkdir()
+    (recent / "2026-01-02_03-04-05-front.mp4").write_bytes(b"video")
+    (recent / "._2026-01-02_03-04-05-front.mp4").write_bytes(b"appledouble")
+    (recent / "._2026-01-02_03-05-05-back.mp4").write_bytes(b"appledouble")
+    clips = ingest.build_index(tmp_path)
+    assert len(clips) == 1
+    assert clips[0]["cams"]["front"].endswith("/2026-01-02_03-04-05-front.mp4")

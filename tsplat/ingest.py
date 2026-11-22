@@ -36,6 +36,7 @@ def copy(src: Path, dest: Path) -> None:
             [
                 "rsync",
                 "-a",
+                "--exclude=._*",
                 "--include=*/",
                 "--include=*.mp4",
                 "--include=event.json",
@@ -47,6 +48,8 @@ def copy(src: Path, dest: Path) -> None:
         )
     else:
         for f in [*src.rglob("*.mp4"), *src.rglob("event.json")]:
+            if f.name.startswith("._"):
+                continue
             out = dest / f.relative_to(src)
             if not out.exists():
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +72,9 @@ def build_index(root: Path) -> list[dict]:
     """Group per-camera files into clips keyed by (folder, timestamp)."""
     groups: dict[tuple[str, str], dict] = defaultdict(dict)
     for f in sorted(p for p in root.rglob("*") if p.suffix.lower() == ".mp4"):
-        m = CLIP_RE.search(f.name)
+        if f.name.startswith("._"):  # macOS AppleDouble metadata files on exFAT/FAT drives
+            continue
+        m = CLIP_RE.match(f.name)
         if m:
             groups[(str(f.parent), m.group(1))][m.group(2).lower()] = f
     clips = []

@@ -1,6 +1,24 @@
+# local footage and pipeline output (contains GPS, plates, faces)
 data/
 work/
-.venv/
-*.pt
-__pycache__/
 target/
+*.mp4
+*.MP4
+*.ply
+*.pt
+!docs/media/**
+
+# python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# misc
+.DS_Store
+node_modules/
+.env

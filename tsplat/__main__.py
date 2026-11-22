@@ -1,12 +1,13 @@
 """tsplat: Tesla dashcam -> 3D Gaussian splat replay.
 
-  tsplat ingest [--src /Volumes/X/TeslaCam]   copy + index footage into data/teslacam
-  tsplat list                                 show clips with 4+ cameras (6 on HW4)
-  tsplat egomask                              mask your car's body (once, needs >= 8 clips)
-  tsplat prep <clip> --name drive1 --start 10 --dur 20
-  tsplat recon drive1                         COLMAP -> Brush training -> chase path
-  tsplat view drive1                          open the replay viewer
+tsplat ingest [--src /Volumes/X/TeslaCam]   copy + index footage into data/teslacam
+tsplat list                                 show clips with 4+ cameras (6 on HW4)
+tsplat egomask                              mask your car's body (once, needs >= 8 clips)
+tsplat prep <clip> --name drive1 --start 10 --dur 20
+tsplat recon drive1                         COLMAP -> Brush training -> chase path
+tsplat view drive1                          open the replay viewer
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,11 +68,15 @@ class RangeHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="tsplat", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        prog="tsplat", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("ingest", help="copy TeslaCam footage off the USB drive and index it")
-    a.add_argument("--src", help="TeslaCam folder or folder of downloaded clips (default: auto-detect /Volumes/*/TeslaCam)")
+    a.add_argument(
+        "--src", help="TeslaCam folder or folder of downloaded clips (default: auto-detect /Volumes/*/TeslaCam)"
+    )
     a.add_argument("--dest", default=DATA)
     a.add_argument("--index-only", action="store_true", help="just re-index --dest")
 
@@ -118,8 +123,16 @@ def main() -> None:
     elif args.cmd == "egomask":
         prep.build_ego_masks(str(Path(DATA) / "index.json"), str(Path(DATA) / "egomask"), args.max_clips)
     elif args.cmd == "prep":
-        prep.run(str(Path(DATA) / "index.json"), args.clip, args.name, args.start, args.dur, args.fps,
-                 args.width, args.mask_movers)
+        prep.run(
+            str(Path(DATA) / "index.json"),
+            args.clip,
+            args.name,
+            args.start,
+            args.dur,
+            args.fps,
+            args.width,
+            args.mask_movers,
+        )
     elif args.cmd == "recon":
         work = Path("work") / args.name
         dense = work / "dense"

@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in ingest / prep / recon / the viewer doesn't work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Don't attach real dashcam footage, frames or telemetry.** They contain GPS traces, plates and faces.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The exact `otrv` / `tsplat` command and the error output (redact paths or locations if needed).
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: car
+    attributes:
+      label: Car, hardware and firmware
+      placeholder: Model Y 2024, HW4, firmware 2025.44.25, 6 cameras
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS and chip, Python, `colmap -h | head -1`, `ffmpeg -version | head -1`, Brush version.
+      render: text
+    validations:
+      required: true

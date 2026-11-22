@@ -1,0 +1,6 @@
+This is a drive I took in my Tesla. [pause] And this is the same drive, rebuilt in 3D.
+Open Tesla Reality View takes the footage your car already records to the USB drive in your glovebox, and turns it into a world you can fly through.
+Every camera is solved together as one rig, then trained into a Gaussian splat, right on your Mac. No cloud. Nothing uploaded.
+Ride along behind your own car. [pause] Or step out, and look around.
+It's free, it's open source, and we're building it in public.
+Plug in your drive, and rebuild yours.

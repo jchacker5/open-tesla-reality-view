@@ -1,0 +1,6 @@
+How do you turn Tesla dashcam clips into 3D? [pause]
+Step one. Copy the TeslaCam folder off the USB drive in your glovebox.
+Step two. Pick twenty seconds of driving. We pull frames from every camera, and mask out your own car.
+Step three. COLMAP solves all the cameras together as one rigid rig, and Brush trains a Gaussian splat on your Mac's GPU.
+Step four. Open the replay: a chase cam behind your car, with every raw camera feed beside it.
+It all runs locally, and the code is on GitHub.

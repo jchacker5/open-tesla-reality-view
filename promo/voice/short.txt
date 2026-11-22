@@ -1,0 +1,5 @@
+Your Tesla is filming everything. [pause]
+So I turned my dashcam into a 3D world.
+Four cameras. One rig. A Gaussian splat, trained on a Mac.
+Now I can replay my drive from any angle.
+It's open source. Pull your USB drive, and try it.

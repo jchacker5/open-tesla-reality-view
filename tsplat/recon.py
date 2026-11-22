@@ -185,7 +185,8 @@ def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
     sp.write_text("\n".join(out) + "\n")
 
 
-def train(work: Path, dense: Path, steps: int, viewer: bool) -> Path:
+def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0) -> Path:
+    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`."""
     out = work / "splat"
     out.mkdir(exist_ok=True)
     args = [
@@ -202,6 +203,8 @@ def train(work: Path, dense: Path, steps: int, viewer: bool) -> Path:
     ]
     if viewer:
         args.append("--with-viewer")
+    if eval_every:
+        args += ["--eval-split-every", str(eval_every), "--eval-every", str(steps), "--eval-save-to-disk"]
     sh(*args)
     final = max(out.glob("splat_*.ply"), key=lambda p: int(p.stem.split("_")[1]))
     dest = work / "viewer" / "scene.ply"

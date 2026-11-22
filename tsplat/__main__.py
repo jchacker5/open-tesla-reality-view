@@ -15,11 +15,12 @@ import http.server
 import json
 import shutil
 import socketserver
+import time
 import webbrowser
 from functools import partial
 from pathlib import Path
 
-from . import ingest, prep, recon
+from . import bench, ingest, prep, recon
 
 DATA = "data/teslacam"
 ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +103,11 @@ def main() -> None:
     a.add_argument("--no-rig", action="store_true", help="don't tie the 6 cameras together as a rig")
     a.add_argument("--live", action="store_true", help="open Brush's live training viewer")
     a.add_argument("--skip-sfm", action="store_true", help="reuse work/<name>/dense")
+    a.add_argument("--eval", action="store_true", help="hold out every 8th view for `otrv bench` PSNR")
+
+    a = sub.add_parser("bench", help="score a reconstruction, gate it, append to work/ledger.jsonl")
+    a.add_argument("name")
+    a.add_argument("--note", default="", help="what changed in this run (the lever)")
 
     a = sub.add_parser("nvs-export", help="posed frames + chase-cam trajectory for a novel-view model (e.g. ViewNeXt)")
     a.add_argument("name")
@@ -136,10 +142,27 @@ def main() -> None:
     elif args.cmd == "recon":
         work = Path("work") / args.name
         dense = work / "dense"
+        timings_path = work / "timings.json"
+        timings = json.loads(timings_path.read_text()) if args.skip_sfm and timings_path.exists() else {}
+        t0 = time.perf_counter()
         if not args.skip_sfm:
-            dense = recon.undistort(work, recon.sfm(work, args.global_mapper, not args.no_rig))
+            model = recon.sfm(work, args.global_mapper, not args.no_rig)
+            timings["sfm"] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            dense = recon.undistort(work, model)
+            timings["undistort"] = time.perf_counter() - t0
         recon.export_path(work, dense)
-        recon.train(work, dense, args.steps, args.live)
+        t0 = time.perf_counter()
+        recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0)
+        timings["train"] = time.perf_counter() - t0
+        timings_path.write_text(json.dumps({k: round(v, 1) for k, v in timings.items()}))
+        (work / "recon_args.json").write_text(
+            json.dumps(
+                {"steps": args.steps, "global_mapper": args.global_mapper, "rig": not args.no_rig, "eval": args.eval}
+            )
+        )
+    elif args.cmd == "bench":
+        bench.run(args.name, args.note)
     elif args.cmd == "nvs-export":
         recon.export_nvs(Path("work") / args.name, args.fps)
     elif args.cmd == "view":

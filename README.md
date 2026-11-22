@@ -94,6 +94,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
 | `view` | local server with byte-range support, so the synced videos can seek |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
+| `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
 
 ## Requirements
 

@@ -1,8 +1,8 @@
 // Voiceover lengths in seconds (from promo/voice/voice-manifest.json). Compositions size to these.
 export const VOICE = {
-  hero: { file: "voice/hero.mp3", seconds: 40 },
-  short: { file: "voice/short.mp3", seconds: 18 },
-  explainer: { file: "voice/explainer.mp3", seconds: 38 },
+  hero: { file: "voice/hero.mp3", seconds: 31.7 },
+  short: { file: "voice/short.mp3", seconds: 16.2 },
+  explainer: { file: "voice/explainer.mp3", seconds: 35.2 },
 };
 
 // Spoken lines, used for on-screen captions. Timed by word count across the voiceover.

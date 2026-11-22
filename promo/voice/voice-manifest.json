@@ -1,0 +1,30 @@
+[
+ {
+  "file": "hero.mp3",
+  "voice": "ara",
+  "speed": null,
+  "duration_s": 31.71,
+  "provider": "xAI TTS (Grok voices)"
+ },
+ {
+  "file": "hero-rex.mp3",
+  "voice": "rex",
+  "speed": null,
+  "duration_s": 31.71,
+  "provider": "xAI TTS (Grok voices)"
+ },
+ {
+  "file": "short.mp3",
+  "voice": "eve",
+  "speed": 1.05,
+  "duration_s": 16.22,
+  "provider": "xAI TTS (Grok voices)"
+ },
+ {
+  "file": "explainer.mp3",
+  "voice": "leo",
+  "speed": null,
+  "duration_s": 35.24,
+  "provider": "xAI TTS (Grok voices)"
+ }
+]

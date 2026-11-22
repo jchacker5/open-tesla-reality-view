@@ -23,14 +23,14 @@ const C = { bg: "#07080a", text: "#eef0f4", dim: "#8a909c", accent: "#3d7bff", l
 export const FPS = 30;
 const T = 15; // transition frames
 
+// Timed to the hero voiceover (voice/hero.mp3, ~31.7 s): each scene lands on its line.
 export const SCENES = {
-  title: 120,
-  footage: 180,
-  pipeline: 210,
-  chase: 330,
-  orbit: 270,
-  telemetry: 210,
-  cta: 180,
+  footage: 100, // "This is a drive I took in my Tesla."
+  chase: 110, // "And this is the same drive, rebuilt in 3D."
+  title: 165, // "Open Tesla Reality View takes the footage..."
+  pipeline: 255, // "Every camera is solved together as one rig..."
+  orbit: 180, // "Ride along behind your own car. Or step out, and look around."
+  cta: 240, // "It's free, it's open source... rebuild yours."
 };
 export const PROMO_FRAMES = Object.values(SCENES).reduce((a, b) => a + b, 0) - T * (Object.keys(SCENES).length - 1);
 
@@ -134,7 +134,7 @@ const Footage: React.FC = () => (
   <AbsoluteFill style={{ background: C.bg }}>
     <Clip src="mosaic.mp4" zoom={[1.0, 1.04]} />
     <Shade />
-    <Caption kicker="01 · capture" title="It starts in your glovebox." sub="Every camera from the car's USB drive, plus the speed and steering data saved with each clip." />
+    <Caption kicker="dashcam · 4 cameras" title="This is a drive." sub="Straight off the USB drive in the glovebox." />
   </AbsoluteFill>
 );
 
@@ -202,7 +202,7 @@ const Chase: React.FC = () => (
   <AbsoluteFill style={{ background: C.bg }}>
     <Clip src="chase.mp4" zoom={[1.0, 1.05]} />
     <Shade />
-    <Caption kicker="03 · replay" title="Ride along behind your own car." sub="A Gaussian splat built from real camera frames, not a game engine." />
+    <Caption kicker="gaussian splat" title="This is the same drive, in 3D." sub="Rebuilt from the real camera frames, not a game engine." />
   </AbsoluteFill>
 );
 
@@ -210,7 +210,7 @@ const Orbit: React.FC = () => (
   <AbsoluteFill style={{ background: C.bg }}>
     <Clip src="orbit.mp4" zoom={[1.0, 1.04]} />
     <Shade />
-    <Caption kicker="04 · explore" title="Then step out of the car." sub="Free camera: orbit, zoom and pan through the reconstructed street." />
+    <Caption kicker="explore" title="Ride along, or step out." sub="Chase cam, driver view, or fly freely through the street." />
   </AbsoluteFill>
 );
 
@@ -259,12 +259,11 @@ const CTA: React.FC = () => (
 
 export const Promo: React.FC = () => {
   const seq: [keyof typeof SCENES, React.FC][] = [
-    ["title", Title],
     ["footage", Footage],
-    ["pipeline", Pipeline],
     ["chase", Chase],
+    ["title", Title],
+    ["pipeline", Pipeline],
     ["orbit", Orbit],
-    ["telemetry", Telemetry],
     ["cta", CTA],
   ];
   return (

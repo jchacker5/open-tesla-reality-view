@@ -1,6 +1,6 @@
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
-import { Video } from "@remotion/media";
+import { Audio } from "@remotion/media";
 import { linearTiming, TransitionSeries } from "@remotion/transitions";
 import { fade } from "@remotion/transitions/fade";
 import type React from "react";
@@ -8,7 +8,9 @@ import {
   AbsoluteFill,
   Easing,
   interpolate,
+  OffthreadVideo,
   spring,
+  getStaticFiles,
   staticFile,
   useCurrentFrame,
   useVideoConfig,
@@ -87,7 +89,7 @@ const Clip: React.FC<{ src: string; zoom?: [number, number]; trim?: number }> = 
   const s = interpolate(f, [0, durationInFrames], zoom);
   return (
     <AbsoluteFill style={{ transform: `scale(${s})` }}>
-      <Video src={staticFile(src)} muted trimBefore={trim} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      <OffthreadVideo src={staticFile(src)} muted trimBefore={trim} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
     </AbsoluteFill>
   );
 };
@@ -267,6 +269,7 @@ export const Promo: React.FC = () => {
   ];
   return (
     <AbsoluteFill style={{ background: C.bg }}>
+      {getStaticFiles().some((f) => f.name === "voice/hero.mp3") && <Audio src={staticFile("voice/hero.mp3")} />}
       <TransitionSeries>
         {seq.flatMap(([k, Comp], i) => {
           const items = [

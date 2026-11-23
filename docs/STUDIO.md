@@ -26,12 +26,19 @@ shows their status.
 ## Privacy and security
 
 - **Local only.** The server binds `127.0.0.1` and answers only to `Host: 127.0.0.1:<port>` or
-  `localhost:<port>`, which blocks DNS rebinding. It refuses requests with a foreign `Origin` or with
-  `Sec-Fetch-Site: cross-site`.
+  `localhost:<port>`, which blocks DNS rebinding. It refuses requests with a foreign `Origin`, with
+  `Sec-Fetch-Site: cross-site`, and with `Sec-Fetch-Site: same-site` (another port on 127.0.0.1) for
+  `/api/*` and anything but a top-level navigation.
 - **A token per launch**, Jupyter-style. The printed URL carries `?token=…`. The server swaps it for an
-  `HttpOnly; SameSite=Strict` cookie and redirects to `/`. `/api/*` and `/cities/*` need the token as a
-  header, the cookie, or `?token=`. Any request that changes state (POST/PUT/DELETE) must send the
-  `X-OTRV-Token` header, so a cookie alone can't be used for CSRF.
+  `HttpOnly; SameSite=Strict` cookie and redirects to `/`. `/api/*` needs the token as a header, the
+  cookie, or `?token=`. Any request that changes state (POST/PUT/DELETE) must send the `X-OTRV-Token`
+  header, so a cookie alone can't be used for CSRF.
+- **Cities live on their own origin.** The viewer pages are served by a second server on the next free
+  port (`http://127.0.0.1:<port+1>/cities/<name>/`, printed at start). It needs no token, ignores and never
+  sets cookies (browsers send the studio's cookie to every port of a host, so it is stripped), answers
+  GET/HEAD only, and sends its own CSP (`CITY_CSP`). A city page is therefore cross-origin to the studio:
+  it can't read the studio page or its token `<meta>`, and the studio refuses its requests (`Origin`
+  and `Sec-Fetch-Site: same-site` checks).
 - **No external requests.** The studio's pages are plain HTML/CSS/JS with no third-party code and no
   CDN. They are served with `Content-Security-Policy: default-src 'self'` and `frame-ancestors 'none'`,
   and a test checks that the static files reference no `http(s)://` URLs.
@@ -39,8 +46,8 @@ shows their status.
   camera files (about 200 MB, not the drive's 100 GB) are copied to `work/<name>/_src/`, and that copy
   is deleted when the build succeeds.
 - **Known gap.** The replay viewer (`viewer/index.html`) still loads three.js and Spark from
-  cdn.jsdelivr.net, so `/cities/<name>/` pages don't get the strict CSP yet. Once the viewer vendors
-  those libraries (issue #13), `CITY_CSP` in `tsplat/studio/server.py` should become `default-src 'self'` too.
+  cdn.jsdelivr.net through an inline import map, so `CITY_CSP` allows that CDN, inline scripts and
+  `wasm-unsafe-eval` (Spark). Once the viewer vendors those libraries (issue #13), it can drop them.
 
 ## How a build runs
 
@@ -108,7 +115,12 @@ POST /api/jobs {clip, start, dur, fps, steps, mask_movers, eval, name}
 GET  /api/jobs           GET /api/jobs/{id}              GET /api/jobs/{id}/events (SSE)
 POST /api/jobs/{id}/cancel   POST /api/jobs/{id}/resume  POST /api/jobs/{id}/kill (orphaned-running only)
 GET  /api/cities         DELETE /api/cities/{name}       GET /api/cities/{name}/poster.jpg
-GET  /cities/{name}/     the viewer, serving work/<name>/viewer/ (byte ranges)
+```
+
+On the cities server (`<port+1>`, no token):
+
+```
+GET  /cities/{name}/     the viewer, serving work/<name>/viewer/ (byte ranges; GET and HEAD)
 ```
 
 The studio keeps its own state in `<data>/studio/`: `sources.json`, `cache.json` (per-clip length,

@@ -257,10 +257,10 @@ SERVE = textwrap.dedent(
     runner = jobs.Runner(
         tmp / "work", plan=lambda job: [jobs.Phase("x", [sys.executable, sleeper, str(pidf)], ("features",))]
     )
-    cfg = server.Config(tmp / "data", tmp / "work", port, token="tok", cwd=tmp)
+    cfg = server.Config(tmp / "data", tmp / "work", port, token="tok", cwd=tmp, city_port=server.free_port(port + 1))
     app = server.create_app(cfg, library=footage.Library(cfg.data, autodetect_fn=lambda: []), runner=runner)
     runner.submit("slow", {})
-    server.run_servers(cfg, [(app, port)], runner)
+    server.run_servers(cfg, [(app, port), (server.create_city_app(cfg), cfg.city_port)], runner)
     print("clean exit", flush=True)
     """
 )

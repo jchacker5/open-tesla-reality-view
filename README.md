@@ -105,7 +105,8 @@ to the **Gallery**, where you can **Drive** them or **Replay** them.
 
 Everything stays on your Mac. The server listens on 127.0.0.1 only and needs the token in the URL it
 prints. Footage is read in place, and only the clip you build is copied. The studio's pages make no
-external requests (the replay viewer still loads three.js/Spark from a CDN). See
+external requests. Cities open from a second local server (the next port, no token, its own CSP; the
+replay viewer still loads three.js/Spark from a CDN), so a city page can't reach the studio. See
 [docs/STUDIO.md](docs/STUDIO.md).
 
 ### Costs

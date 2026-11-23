@@ -1,5 +1,8 @@
 // otrv studio front end: plain ES modules, no build step, no third-party code, no external requests.
 const TOKEN = document.querySelector('meta[name="otrv-token"]').content;
+// city pages live on a second local server (another origin: no token, no cookie, their own CSP)
+const CITIES = document.querySelector('meta[name="otrv-cities"]').content;
+const cityUrl = (name, hash = "") => `${CITIES}/cities/${encodeURIComponent(name)}/${hash}`;
 const STAGES = ["frames", "masks", "features", "match", "map", "undistort", "train", "export"];
 const STAGE_LABEL = {
   frames: "Frames", masks: "Masks", features: "Features", match: "Match",
@@ -811,8 +814,8 @@ async function drawJob(name, box) {
     if (job.state === "done") {
       doneBox.replaceChildren(h("div", {}, h("b", { text: "Your city is ready." }), h("div", { class: "muted", text: "Drive through it, or replay the chase cam." })),
         h("div", { class: "row" },
-          h("a", { class: "btn primary", href: `/cities/${encodeURIComponent(job.name)}/?mode=drive`, target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
-          h("a", { class: "btn", href: `/cities/${encodeURIComponent(job.name)}/`, target: "_blank", rel: "noopener" }, icon("replay"), "Replay")));
+          h("a", { class: "btn primary", href: cityUrl(job.name, "?mode=drive"), target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
+          h("a", { class: "btn", href: cityUrl(job.name), target: "_blank", rel: "noopener" }, icon("replay"), "Replay")));
     }
     actions.replaceChildren();
     if (job.state === "running" || job.state === "queued") {
@@ -915,8 +918,8 @@ async function pageGallery(view) {
           h("div", {}, h("b", { text: bytes(c.splat_bytes) }), "splat"),
           h("div", {}, h("b", { text: bytes(c.disk_bytes) }), "on disk")),
         h("div", { class: "city-actions" },
-          h("a", { class: "btn primary", href: `/cities/${encodeURIComponent(c.name)}/?mode=drive`, target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
-          h("a", { class: "btn", href: `/cities/${encodeURIComponent(c.name)}/`, target: "_blank", rel: "noopener" }, icon("replay"), "Replay"),
+          h("a", { class: "btn primary", href: cityUrl(c.name, "?mode=drive"), target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
+          h("a", { class: "btn", href: cityUrl(c.name), target: "_blank", rel: "noopener" }, icon("replay"), "Replay"),
           h("button", { class: "danger", title: "Delete this city", "aria-label": `Delete ${c.name}`, onclick: async () => {
             if (!(await confirmDialog(`Delete ${c.name}?`, `Removes work/${c.name} (${bytes(c.disk_bytes)}): the splat, frames and models. Your footage is not touched.`))) return;
             try { await api(`/api/cities/${encodeURIComponent(c.name)}`, { method: "DELETE" }); card.remove(); toast(`Deleted ${c.name}`); } catch (e) { toast(e.message, true); }

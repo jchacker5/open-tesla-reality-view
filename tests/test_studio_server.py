@@ -83,8 +83,11 @@ def test_rejects_foreign_origin(client, origin):
 
 def test_same_origin_and_sec_fetch(client):
     assert client.post("/api/sources/rescan", headers={**AUTH, "Origin": BASE}).status_code == 200
-    r = client.get("/api/sources", headers={**AUTH, "Sec-Fetch-Site": "cross-site"})
-    assert r.status_code == 403
+    for site in ("cross-site", "same-site"):  # same-site: another port on 127.0.0.1
+        r = client.get("/api/sources", headers={**AUTH, "Sec-Fetch-Site": site})
+        assert r.status_code == 403 and site in r.json()["detail"]
+    for site in ("same-origin", "none"):
+        assert client.get("/api/sources", headers={**AUTH, "Sec-Fetch-Site": site}).status_code == 200
 
 
 def test_static_and_security_headers(client):
@@ -105,25 +108,78 @@ def test_frontend_makes_no_external_requests():
         assert urls == [], f"{f.name} references {urls}"
 
 
-def test_cities_need_token(tmp_path):
-    app, cfg, _ = make_app(tmp_path)
-    c = TestClient(app, base_url=BASE)
-    city = cfg.work / "drive1" / "viewer"
+CITY_BASE = f"http://127.0.0.1:{PORT + 1}"
+
+
+def make_city(cfg, name="drive1"):
+    city = cfg.work / name / "viewer"
     city.mkdir(parents=True)
     (city / "scene.ply").write_bytes(b"ply\n" + b"\0" * 100)
     (city / "path.json").write_text("[]")
-    assert c.get("/cities/drive1/").status_code == 401
-    c.get(f"/?token={TOKEN}")
-    r = c.get("/cities/drive1/")
+    return city
+
+
+def test_cities_are_served_on_their_own_origin(tmp_path):
+    """City pages come from a second server (another port, so another origin): no token, no cookie, their
+    own CSP. The studio itself no longer serves /cities."""
+    app, cfg, _ = make_app(tmp_path)
+    make_city(cfg)
+    studio = TestClient(app, base_url=BASE)
+    studio.get(f"/?token={TOKEN}")
+    assert studio.get("/cities/drive1/").status_code == 404
+
+    c = TestClient(server.create_city_app(cfg), base_url=CITY_BASE)
+    r = c.get("/cities/drive1/")  # no token needed
     assert r.status_code == 200 and "<html" in r.text.lower()
-    assert "default-src" not in r.headers["content-security-policy"]  # viewer still loads three/Spark from a CDN
+    csp = r.headers["content-security-policy"]
+    assert csp != server.CSP and "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
+    assert r.headers["x-frame-options"] == "DENY" and r.headers["referrer-policy"] == "no-referrer"
     assert c.get("/cities/drive1/path.json").json() == []
     r = c.get("/cities/drive1/scene.ply", headers={"Range": "bytes=0-3"})
     assert r.status_code == 206 and r.content == b"ply\n"
+    assert c.head("/cities/drive1/scene.ply").status_code == 200  # viewer v2 probes it with HEAD
+    assert c.head("/cities/drive1/").status_code == 200
+    assert "<html" in c.get("/cities/drive1/index.html").text.lower()  # the viewer's own folder is a fallback
     assert c.get("/cities/drive1/../../secret").status_code == 404
+    assert c.get("/cities/drive1/%2e%2e/%2e%2e/secret").status_code == 404
     assert c.get("/cities/nope/").status_code == 404
-    r = c.get("/cities/drive1?mode=drive", follow_redirects=False)
-    assert r.status_code == 307 and r.headers["location"] == "/cities/drive1/?mode=drive"
+    r = c.get("/cities/drive1?t=3", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/cities/drive1/?t=3"
+    for path in ("/", "/api/sources", "/static/app.js", f"/?token={TOKEN}"):
+        assert c.get(path, headers=AUTH).status_code == 404  # nothing of the studio's lives here
+    assert c.delete("/cities/drive1/scene.ply").status_code == 405
+    assert c.get("/cities/drive1/", headers={"Host": f"evil.example:{PORT + 1}"}).status_code == 403
+    assert c.get("/cities/drive1/", headers={"Host": f"127.0.0.1:{PORT}"}).status_code == 403
+
+
+def test_city_pages_cannot_get_the_token(tmp_path):
+    app, cfg, _ = make_app(tmp_path)
+    make_city(cfg)
+    c = TestClient(server.create_city_app(cfg), base_url=CITY_BASE)
+    # the browser sends the studio's cookie to the cities port too (cookies ignore ports): never echoed or used
+    for path in ("/cities/drive1/", "/cities/drive1/path.json", "/cities/drive1/scene.ply"):
+        r = c.get(path, headers={"Cookie": f"{server.COOKIE}={TOKEN}"})
+        assert TOKEN not in r.text and TOKEN not in str(r.headers) and "set-cookie" not in r.headers
+
+    # and from a city page, the studio is same-site (same host, other port) and cross-origin: refused
+    studio = TestClient(app, base_url=BASE)
+    studio.get(f"/?token={TOKEN}")  # the browser holds the cookie
+    from_city = {"Origin": CITY_BASE, "Sec-Fetch-Site": "same-site"}
+    assert studio.get("/api/sources", headers={"Origin": CITY_BASE}).status_code == 403
+    assert studio.get("/api/sources", headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert studio.post("/api/sources/rescan", headers={**AUTH, **from_city}).status_code == 403
+    # a subresource load of the studio page (iframe, fetch) is refused; X-Frame-Options/CSP stop framing too
+    r = studio.get("/", headers={"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "no-cors"})
+    assert r.status_code == 403 and TOKEN not in r.text
+    r = studio.get("/", headers={"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate"})
+    assert r.status_code == 200 and r.headers["x-frame-options"] == "DENY"  # a top-level visit is fine
+    assert "default-src 'self'" in r.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+
+
+def test_studio_page_points_at_the_cities_origin(client):
+    client.get(f"/?token={TOKEN}")
+    assert f'<meta name="otrv-cities" content="{CITY_BASE}">' in client.get("/").text
 
 
 def test_gallery_and_delete(tmp_path):

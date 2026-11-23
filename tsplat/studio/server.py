@@ -1,9 +1,12 @@
 """The studio HTTP server (FastAPI). Local only: binds 127.0.0.1, checks Host and Origin, and requires a
-random per-launch token (in the URL it opens, Jupyter-style) on /api and /cities.
+random per-launch token (in the URL it opens, Jupyter-style) on /api.
 
 The token arrives once as /?token=...; the server swaps it for an HttpOnly SameSite=Strict cookie and
 redirects to /. The page reads the token from a <meta> tag and sends it as X-OTRV-Token: state-changing
 requests (POST/PUT/DELETE) must carry that header, so a cookie alone can't be used cross-site.
+
+Cities (the replay viewer over work/<name>/viewer/) are served by a second server on another port, so
+they are another origin: a city page can't read the studio page, its token <meta>, or the API.
 """
 
 from __future__ import annotations
@@ -40,17 +43,33 @@ CSP = (
     "script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
     "form-action 'self'; frame-ancestors 'none'"
 )
-# TODO(viewer, #13): the viewer (viewer/index.html, owned by feat/viewer-v2) still imports three.js and Spark
-# from cdn.jsdelivr.net, so /cities/ pages can't carry the studio's `default-src 'self'` CSP yet. Once the
-# viewer vendors those libraries, apply CSP to /cities/ too.
-CITY_CSP = "object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
+# City pages are served by a second server on their own port (a separate origin with no token and no
+# cookie), with their own policy. TODO(viewer, #13): the viewer (viewer/index.html, owned by feat/viewer-v2)
+# imports three.js and Spark from cdn.jsdelivr.net through an inline import map, so this policy allows that
+# CDN and inline scripts; once the viewer vendors those libraries it can drop both.
+CDN = "https://cdn.jsdelivr.net"
+CITY_CSP = (
+    f"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: {CDN}; "
+    f"worker-src 'self' blob: data: {CDN}; connect-src 'self' blob: data: {CDN}; "
+    "img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+    "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
 
 
 class Config:
-    def __init__(self, data: Path, work: Path, port: int, token: str | None = None, cwd: Path | None = None):
+    def __init__(
+        self,
+        data: Path,
+        work: Path,
+        port: int,
+        token: str | None = None,
+        cwd: Path | None = None,
+        city_port: int | None = None,
+    ):
         self.data = Path(data).expanduser().resolve()
         self.work = Path(work)
         self.port = port
+        self.city_port = city_port or port + 1
         self.token = token or secrets.token_urlsafe(24)
         self.cwd = cwd or Path.cwd()
         # set when the process is asked to stop (SIGINT/SIGTERM/SIGHUP): long-lived responses (SSE) end
@@ -58,13 +77,15 @@ class Config:
         hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
         self.hosts = set(hosts)
         self.origins = {f"http://{h}" for h in hosts}
+        self.city_hosts = {f"127.0.0.1:{self.city_port}", f"localhost:{self.city_port}"}
+        self.city_base = f"http://127.0.0.1:{self.city_port}"
 
 
 # ---- security middleware ----------------------------------------------------------------------------
 
 
 class Guard:
-    """Host/Origin checks, token auth for /api and /cities, and security headers on every response."""
+    """Host/Origin/Sec-Fetch-Site checks, token auth for /api, and security headers on every response."""
 
     def __init__(self, app, cfg: Config):
         self.app, self.cfg = app, cfg
@@ -81,10 +102,15 @@ class Guard:
         origin = h.get("origin")
         if origin is not None and origin not in self.cfg.origins:
             return 403, "cross-origin request refused"
-        if h.get("sec-fetch-site") == "cross-site":
-            return 403, "cross-site request refused"
         path, method = scope["path"], scope["method"]
-        if not (path.startswith("/api/") or path.startswith("/cities/") or path == "/cities"):
+        site = h.get("sec-fetch-site")
+        if site == "cross-site":
+            return 403, "cross-site request refused"
+        # same-site = another port on 127.0.0.1, e.g. a city page: it gets the studio's cookie (cookies
+        # ignore ports), so it may not reach the API or load studio pages as subresources
+        if site == "same-site" and (path.startswith("/api/") or h.get("sec-fetch-mode") != "navigate"):
+            return 403, "same-site request refused"
+        if not path.startswith("/api/"):
             return None
         header = h.get("x-otrv-token")
         if method not in ("GET", "HEAD"):
@@ -110,11 +136,8 @@ class Guard:
                 hd["X-Content-Type-Options"] = "nosniff"
                 hd["Referrer-Policy"] = "no-referrer"
                 hd["Cross-Origin-Opener-Policy"] = "same-origin"
-                if path.startswith("/cities"):
-                    hd["Content-Security-Policy"] = CITY_CSP
-                else:
-                    hd["Content-Security-Policy"] = CSP
-                    hd["X-Frame-Options"] = "DENY"
+                hd["Content-Security-Policy"] = CSP
+                hd["X-Frame-Options"] = "DENY"
                 if path.startswith("/api/") and "cache-control" not in hd:
                     hd["Cache-Control"] = "no-store"
             await send(message)
@@ -190,7 +213,7 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
         cookie = request.cookies.get(COOKIE)
         if not cookie or not secrets.compare_digest(cookie.encode(), cfg.token.encode()):
             return HTMLResponse(_locked_page(), status_code=401)
-        html = (STATIC / "index.html").read_text().replace("{{TOKEN}}", cfg.token)
+        html = (STATIC / "index.html").read_text().replace("{{TOKEN}}", cfg.token).replace("{{CITIES}}", cfg.city_base)
         return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -428,10 +451,7 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
     # ---- cities ----
 
     def need_city(name: str) -> Path:
-        d = cfg.work / name
-        if not valid_name(name) or not builds.is_city(d):
-            raise HTTPException(404, f"no city {name}")
-        return d
+        return _city_dir(cfg, name)
 
     @app.get("/api/cities")
     def list_cities():
@@ -453,29 +473,99 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
         shutil.rmtree(d)
         return {"deleted": name}
 
-    @app.get("/cities/{name}", include_in_schema=False)
+    guard = Guard(app, cfg)
+    guard.runner = run
+    return guard
+
+
+# ---- the cities origin ------------------------------------------------------------------------------
+
+
+def _city_dir(cfg: Config, name: str) -> Path:
+    d = cfg.work / name
+    if not valid_name(name) or not builds.is_city(d):
+        raise HTTPException(404, f"no city {name}")
+    return d
+
+
+class CityGuard:
+    """The cities server: its own port, so its own origin. It needs no token, never sees the studio's
+    cookie (browsers scope cookies by host, not port, so it is stripped here), answers GET/HEAD only, and
+    sends CITY_CSP. The studio page (and its token <meta>) is a different origin that a city page can't read,
+    and the studio refuses same-site requests to /api."""
+
+    def __init__(self, app, cfg: Config):
+        self.app, self.cfg = app, cfg
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        h = Headers(scope=scope)
+        bad = None
+        if h.get("host") not in self.cfg.city_hosts:
+            bad = 403, "bad Host header (the cities server only answers on 127.0.0.1 / localhost)"
+        elif scope["method"] not in ("GET", "HEAD"):
+            bad = 405, "read only"
+        if bad:
+            return await JSONResponse({"detail": bad[1]}, status_code=bad[0])(scope, receive, send)
+        scope = {**scope, "headers": [(k, v) for k, v in scope["headers"] if k.lower() != b"cookie"]}
+
+        async def send_headers(message):
+            if message["type"] == "http.response.start":
+                hd = MutableHeaders(scope=message)
+                hd["Content-Security-Policy"] = CITY_CSP
+                hd["X-Content-Type-Options"] = "nosniff"
+                hd["Referrer-Policy"] = "no-referrer"
+                hd["X-Frame-Options"] = "DENY"
+                hd["Cross-Origin-Opener-Policy"] = "same-origin"
+                if "set-cookie" in hd:
+                    del hd["set-cookie"]
+            await send(message)
+
+        await self.app(scope, receive, send_headers)
+
+
+def create_city_app(cfg: Config) -> CityGuard:
+    """/cities/<name>/ is the replay viewer over work/<name>/viewer/ (byte ranges for the videos)."""
+    app = FastAPI(title="otrv cities", docs_url=None, redoc_url=None, openapi_url=None)
+
+    # GET and HEAD everywhere: viewer v2 probes scene.ply with HEAD before loading it
+    @app.api_route("/cities/{name}", methods=["GET", "HEAD"], include_in_schema=False)
     def city_redirect(name: str, request: Request):
         q = request.url.query
         return RedirectResponse(f"/cities/{name}/" + (f"?{q}" if q else ""), status_code=307)
 
-    @app.get("/cities/{name}/", include_in_schema=False)
+    @app.api_route("/cities/{name}/", methods=["GET", "HEAD"], include_in_schema=False)
     def city_page(name: str):
-        need_city(name)
-        from ..__main__ import viewer_html
+        _city_dir(cfg, name)
+        return HTMLResponse(viewer_html_text(), headers={"Cache-Control": "no-store"})
 
-        return HTMLResponse(viewer_html().read_text(), headers={"Cache-Control": "no-store"})
-
-    @app.get("/cities/{name}/{rel:path}", include_in_schema=False)
+    @app.api_route("/cities/{name}/{rel:path}", methods=["GET", "HEAD"], include_in_schema=False)
     def city_file(name: str, rel: str):
-        root = (need_city(name) / "viewer").resolve()
-        p = (root / rel).resolve()
-        if not p.is_relative_to(root) or not p.is_file():
-            raise HTTPException(404, "not found")
-        return FileResponse(p)
+        # the city's own files first, then the viewer's siblings (viewer v2 ships car.js, models/, sounds/)
+        for root in ((_city_dir(cfg, name) / "viewer").resolve(), viewer_dir()):
+            if root is None:
+                continue
+            p = (root / rel).resolve()
+            if p.is_relative_to(root) and p.is_file():
+                return FileResponse(p)
+        raise HTTPException(404, "not found")
 
-    guard = Guard(app, cfg)
-    guard.runner = run
-    return guard
+    return CityGuard(app, cfg)
+
+
+def viewer_dir() -> Path | None:
+    """The folder holding the viewer page (and, from viewer v2 on, its car.js/models/sounds)."""
+    from ..__main__ import viewer_html
+
+    p = viewer_html()
+    return Path(str(p)).resolve().parent if isinstance(p, Path) or Path(str(p)).is_file() else None
+
+
+def viewer_html_text() -> str:
+    from ..__main__ import viewer_html
+
+    return viewer_html().read_text()
 
 
 def _locked_page() -> str:
@@ -546,12 +636,14 @@ def run_servers(cfg: Config, apps: list[tuple[object, int]], runner: Runner) -> 
 
 def serve(data: str, port: int = 8770, open_browser: bool = True, work: str = "work") -> None:
     port = free_port(port)
-    cfg = Config(Path(data), Path(work).resolve(), port)
+    city_port = free_port(port + 1)
+    cfg = Config(Path(data), Path(work).resolve(), port, city_port=city_port)
     app = create_app(cfg)
     url = f"http://127.0.0.1:{port}/?token={cfg.token}"
     print(f"otrv studio: {url}")
+    print(f"  cities (the viewer, no token): {cfg.city_base}/cities/<name>/")
     print("  local only (127.0.0.1); footage is read in place and never uploaded. ctrl-c to stop.", flush=True)
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    run_servers(cfg, [(app, port)], app.runner)
+    run_servers(cfg, [(app, port), (create_city_app(cfg), city_port)], app.runner)
     print("otrv studio: stopped", flush=True)

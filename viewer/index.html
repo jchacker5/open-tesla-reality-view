@@ -362,7 +362,9 @@ renderer.setAnimationLoop((now) => {
     const want = mode === "chase"
       ? road.clone().addScaledVector(f, -9 * M).addScaledVector(UP, 4.2 * M)
       : p.clone().addScaledVector(f, 0.2 * M);
-    const look = mode === "chase" ? road.clone().addScaledVector(f, 14 * M).addScaledVector(UP, 1 * M) : p.clone().add(f);
+    // portrait (phone): aim lower so the car sits clear of the control bar at the bottom of the stage
+    const lift = camera.aspect < 1 ? 1 - 2.4 : 1;
+    const look = mode === "chase" ? road.clone().addScaledVector(f, 14 * M).addScaledVector(UP, lift * M) : p.clone().add(f);
     const k = first ? 1 : 1 - Math.pow(0.002, dt);
     smoothPos.lerp(want, k); smoothLook.lerp(look, k); first = false;
     camera.position.copy(smoothPos);

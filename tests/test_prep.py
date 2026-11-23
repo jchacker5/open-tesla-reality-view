@@ -171,6 +171,32 @@ def test_run_clears_stale_outputs_and_records_actual_dur(tmp_path, monkeypatch):
     assert seen["dur"] == meta["dur"]
 
 
+def test_ego_mask_summary_checks_each_camera(tmp_path):
+    cams = ["front", "back", "left_repeater"]
+    assert prep.ego_mask_summary(tmp_path / "egomask", cams).startswith("ego mask: guessed from the window for front")
+    (tmp_path / "egomask").mkdir()  # folder exists but holds masks for only some cameras
+    (tmp_path / "egomask" / "front.png").touch()
+    (tmp_path / "egomask" / "back.png").touch()
+    msg = prep.ego_mask_summary(tmp_path / "egomask", cams)
+    assert "prebuilt for front, back" in msg and "guessed from the window for left_repeater" in msg
+
+
+def test_mask_movers_without_ultralytics_fails_before_extracting(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    clip = CLIP | {"kind": "RecentClips", "cams": {"front": "/x/front.mp4"}}
+    (data / "index.json").write_text(json.dumps([clip]))
+    real_find_spec = prep.importlib.util.find_spec
+    monkeypatch.setattr(
+        prep.importlib.util, "find_spec", lambda n, *a: None if n == "ultralytics" else real_find_spec(n, *a)
+    )
+    monkeypatch.setattr(prep, "extract_frames", lambda *a: pytest.fail("extracted frames before the check"))
+    (tmp_path / "work" / "drive" / "dense").mkdir(parents=True)  # an existing run must survive the refusal
+    with pytest.raises(SystemExit, match="uv sync --extra movers"):
+        prep.run(str(data / "index.json"), clip["id"], "drive", 0, 4, 3.0, 640, True, workdir=str(tmp_path / "work"))
+    assert (tmp_path / "work" / "drive" / "dense").exists()
+
+
 def fake_recon(work, n):
     """What a finished `otrv recon --eval` leaves behind for n frames per camera."""
     sp = work / "dense" / "sparse"

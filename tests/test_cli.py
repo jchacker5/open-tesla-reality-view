@@ -93,6 +93,15 @@ def test_suggest_prints_ready_to_paste_prep(in_tmp, capsys):
     assert "ev/" not in out  # Sentry excluded
 
 
+def test_ingest_kinds_default_is_plain_text_in_help():
+    parser = cli.build_parser()
+    ingest_p = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction)).choices["ingest"]
+    help_text = " ".join(ingest_p.format_help().split())
+    assert "(default: RecentClips,SavedClips)" in help_text and "('RecentClips'" not in help_text
+    assert parser.parse_args(["ingest"]).kinds == ("RecentClips", "SavedClips")
+    assert parser.parse_args(["ingest", "--kinds", "SentryClips"]).kinds == ("SentryClips",)
+
+
 def test_ingest_dest_is_an_alias_for_data(in_tmp, monkeypatch):
     seen = {}
     monkeypatch.setattr(cli.ingest, "run", lambda src, data, *a: seen.update(data=data))

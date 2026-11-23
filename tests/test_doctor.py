@@ -8,6 +8,10 @@ COLMAP_4 = "COLMAP 4.2.1 (Commit abc)\nUsage:\n  colmap [command]\nAvailable com
 COLMAP_3 = "COLMAP 3.12.0 (Commit abc)\nAvailable commands:\n  mapper\n  rig_configurator\n"
 
 
+def set_free_gb(monkeypatch, gb):
+    monkeypatch.setattr(doctor.shutil, "disk_usage", lambda p: type("U", (), {"free": gb * 2**30})())
+
+
 @pytest.fixture
 def tools(monkeypatch, tmp_path):
     """Fake PATH + subprocess: `found` maps tool -> path, `outputs` maps argv[0] name -> stdout."""
@@ -19,6 +23,7 @@ def tools(monkeypatch, tmp_path):
     monkeypatch.setenv("BRUSH", str(exe))
     monkeypatch.delenv("OTRV_SKIP_DOCTOR", raising=False)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: found.get(name))
+    set_free_gb(monkeypatch, 500)
 
     def fake_run(cmd, **kw):
         name = cmd[0].rsplit("/", 1)[-1]
@@ -98,9 +103,14 @@ def test_intel_mac_is_reported_clearly(monkeypatch):
 
 
 def test_disk_and_ram(monkeypatch, tmp_path):
-    monkeypatch.setattr(doctor.shutil, "disk_usage", lambda p: type("U", (), {"free": 3 * 2**30})())
+    set_free_gb(monkeypatch, 3)
     c = doctor.check_disk(tmp_path / "not" / "yet")  # walks up to an existing parent
-    assert not c.ok and "3.0 GB" in c.detail
+    assert not c.ok and c.warn_only and "3.0 GB" in c.detail and "10 GB+ recommended" in c.detail
+    set_free_gb(monkeypatch, 1.5)
+    c = doctor.check_disk(tmp_path)
+    assert not c.ok and not c.warn_only and "need 2 GB+" in c.detail
+    set_free_gb(monkeypatch, 50)
+    assert doctor.check_disk(tmp_path).ok
     monkeypatch.setattr(doctor, "ram_gb", lambda: 8.0)
     c = doctor.check_ram()
     assert not c.ok and c.warn_only and "--steps" in c.fix
@@ -117,6 +127,16 @@ def test_preflight_fails_early_with_fix(tools, monkeypatch):
     doctor.preflight("prep", skip=("ffmpeg",))  # skipped -> passes
     monkeypatch.setenv("OTRV_SKIP_DOCTOR", "1")
     doctor.preflight("prep")
+
+
+@pytest.mark.parametrize("step", ["prep", "recon"])
+def test_preflight_checks_disk_for_prep_and_recon(tools, monkeypatch, capsys, step):
+    set_free_gb(monkeypatch, 5)
+    doctor.preflight(step)  # low: warns, still runs
+    assert "warning before `otrv " + step in capsys.readouterr().out
+    set_free_gb(monkeypatch, 1)
+    with pytest.raises(SystemExit, match="need 2 GB"):
+        doctor.preflight(step)
 
 
 def test_preflight_recon_checks_colmap_and_brush(tools, monkeypatch):

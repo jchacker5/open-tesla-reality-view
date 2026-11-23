@@ -12,6 +12,7 @@ work/<name>/
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import shutil
@@ -363,6 +364,16 @@ def check_window(clip: dict, start: float, dur: float, slack: float = 0.5) -> No
         )
 
 
+def ego_mask_summary(egodir: Path, cams: list[str]) -> str:
+    """Which cameras get a prebuilt mask (egomask/<cam>.png exists) and which fall back to a guess."""
+    built = [c for c in cams if (egodir / f"{c}.png").exists()]
+    guessed = [c for c in cams if c not in built]
+    parts = [f"prebuilt for {', '.join(built)}"] if built else []
+    if guessed:
+        parts.append(f"guessed from the window for {', '.join(guessed)} (run `otrv egomask` for better)")
+    return "ego mask: " + "; ".join(parts)
+
+
 # Everything prep and the steps after it write. Re-prepping a name invalidates all of it: a new window
 # with an old dense/ or splat would let `otrv bench` score (and `otrv view` show) the previous run.
 STALE_DIRS = ("images", "masks", "viewer/cams", "sparse", "dense", "splat", "nvs", "_maskimgs", "_maskdense")
@@ -403,6 +414,8 @@ def run(
     if not clip:
         raise SystemExit(f"clip {clip_id!r} not in {index}; run `otrv list` to see clip ids")
     check_window(clip, start, dur)
+    if movers and importlib.util.find_spec("ultralytics") is None:  # fail before any (slow) extraction
+        raise SystemExit("--mask-movers needs ultralytics: run `uv sync --extra movers` (~1 GB PyTorch download)")
     cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
@@ -415,7 +428,7 @@ def run(
         raise SystemExit(f"ffmpeg extracted no frames for {', '.join(empty) or 'any camera'}; check --start/--dur")
     actual_dur = round(min(counts.values()) / fps, 3)
     egodir = Path(index).parent / "egomask"
-    print("ego mask: " + ("prebuilt" if egodir.exists() else "guessed from window (run `otrv egomask` for better)"))
+    print(ego_mask_summary(egodir, list(cams)))
     write_masks(out, list(cams), movers, egodir)
     print(f"pairs: {write_pairs(out, list(cams))}")
     write_rig_config(out, list(cams))

@@ -14,7 +14,8 @@ from pathlib import Path
 from . import brush
 
 MIN_COLMAP = (4, 0)
-MIN_FREE_GB = 10  # a 20 s, 4-6 camera window plus training output needs a few GB; leave headroom
+WARN_FREE_GB = 10  # a 20 s, 4-6 camera window plus training output needs a few GB; leave headroom
+MIN_FREE_GB = 2  # below this, prep/recon will almost certainly run out mid-way
 MIN_RAM_GB = 16
 
 
@@ -114,19 +115,19 @@ def check_brush() -> Check:
     return Check("brush", True, f"{m.group(0)} at {p}")
 
 
-def check_disk(path: str | Path = ".", need_gb: float = MIN_FREE_GB) -> Check:
+def check_disk(path: str | Path = ".", warn_gb: float = WARN_FREE_GB, fail_gb: float = MIN_FREE_GB) -> Check:
+    """Free space where work/ lives: a warning below warn_gb, a failure below fail_gb."""
     p = Path(path)
     while not p.exists() and p != p.parent:
         p = p.parent
     free = shutil.disk_usage(p).free / 2**30
-    if free < need_gb:
-        return Check(
-            "disk",
-            False,
-            f"{free:.1f} GB free at {p.resolve()}; need {need_gb:.0f} GB+",
-            "free up space, or run from a bigger disk (use --data for footage)",
-        )
-    return Check("disk", True, f"{free:.0f} GB free at {p.resolve()}")
+    fix = "free up space, or run from a bigger disk (use --data for footage)"
+    where = p.resolve()
+    if free < fail_gb:
+        return Check("disk", False, f"{free:.1f} GB free at {where}; need {fail_gb:g} GB+", fix)
+    if free < warn_gb:
+        return Check("disk", False, f"{free:.1f} GB free at {where}; {warn_gb:g} GB+ recommended", fix, warn_only=True)
+    return Check("disk", True, f"{free:.0f} GB free at {where}")
 
 
 def ram_gb() -> float | None:
@@ -164,8 +165,8 @@ CHECKS = {
 PREFLIGHT = {
     "ingest": ["ffprobe"],
     "egomask": ["ffmpeg"],
-    "prep": ["ffmpeg", "ffprobe"],
-    "recon": ["colmap", "brush"],
+    "prep": ["ffmpeg", "ffprobe", "disk"],
+    "recon": ["colmap", "brush", "disk"],
 }
 
 
@@ -196,6 +197,9 @@ def preflight(step: str, skip: tuple[str, ...] = ()) -> None:
     if os.environ.get("OTRV_SKIP_DOCTOR"):
         return
     checks = run_checks([n for n in PREFLIGHT.get(step, []) if n not in skip])
+    warnings = [c for c in checks if not c.ok and c.warn_only]
+    if warnings:
+        print(f"warning before `otrv {step}`:\n{format_checks(warnings)}")
     bad = [c for c in checks if not c.ok and not c.warn_only]
     if bad:
         raise SystemExit(f"`otrv {step}` can't start:\n{format_checks(bad)}\n(run `otrv doctor` for a full check)")

@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument(
         "--kinds",
         type=_kinds,
-        default=ingest.DEFAULT_KINDS,
+        default=",".join(ingest.DEFAULT_KINDS),
         help="comma-separated folders to copy: RecentClips, SavedClips, SentryClips "
         "(Sentry clips are recorded parked, so they're opt-in)",
     )

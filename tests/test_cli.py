@@ -180,3 +180,28 @@ def test_every_option_has_help_and_prog_is_otrv():
     )
     assert "6 cameras" not in text and "tsplat" not in text
     assert "(default: 15000)" in text  # ArgumentDefaultsHelpFormatter
+
+
+def test_install_viewer_copies_modules_and_user_model(tmp_path, monkeypatch):
+    from tsplat import __main__ as cli
+
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "car.json").write_text('{"file": "car.glb"}')
+    (models / "car.glb").write_bytes(b"glTF")
+    monkeypatch.setenv("OTRV_MODELS", str(models))
+    vd = tmp_path / "viewer"
+    vd.mkdir()
+    cli.install_viewer(vd)
+    assert (vd / "index.html").is_file() and (vd / "car.js").is_file()
+    assert (vd / "models" / "car.glb").read_bytes() == b"glTF"
+
+    assert json.loads((vd / "features.json").read_text()) == {"collision": False, "model": True, "sounds": []}
+
+    monkeypatch.setenv("OTRV_MODELS", str(tmp_path / "none"))  # no model installed -> stale copy removed
+    (vd / "collision.json").write_text("{}")
+    (vd / "sounds").mkdir()
+    (vd / "sounds" / "horn.mp3").write_bytes(b"ID3")
+    cli.install_viewer(vd)
+    assert not (vd / "models").exists()
+    assert json.loads((vd / "features.json").read_text()) == {"collision": True, "model": False, "sounds": ["horn.mp3"]}

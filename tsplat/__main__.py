@@ -17,6 +17,7 @@ import argparse
 import errno
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -31,15 +32,51 @@ WORK = Path("work")
 ROOT = Path(__file__).resolve().parent.parent
 
 
+VIEWER_FILES = ("index.html", "car.js")
+
+
 def viewer_html():
     """The viewer page: packaged in the wheel as tsplat/viewer/index.html, else the repo's viewer/."""
-    packaged = resources.files("tsplat") / "viewer" / "index.html"
+    return viewer_file("index.html")
+
+
+def viewer_file(name: str):
+    """A viewer asset: packaged in the wheel under tsplat/viewer/, else the repo's viewer/."""
+    packaged = resources.files("tsplat") / "viewer" / name
     if packaged.is_file():
         return packaged
-    source = ROOT / "viewer" / "index.html"
+    source = ROOT / "viewer" / name
     if not source.is_file():
-        raise SystemExit("viewer/index.html is missing from this install; reinstall open-tesla-reality-view")
+        raise SystemExit(f"viewer/{name} is missing from this install; reinstall open-tesla-reality-view")
     return source
+
+
+def user_models_dir() -> Path:
+    """User-installed car models (never in the repo): $OTRV_MODELS, else ~/.otrv/models."""
+    return Path(os.environ.get("OTRV_MODELS", Path.home() / ".otrv" / "models")).expanduser()
+
+
+def install_viewer(vd: Path) -> None:
+    """Copy the viewer page + modules into a served run folder, plus the user's car model if any."""
+    for name in VIEWER_FILES:
+        (vd / name).write_bytes(viewer_file(name).read_bytes())
+    out = vd / "models"
+    shutil.rmtree(out, ignore_errors=True)
+    src = user_models_dir()
+    if (src / "car.json").is_file():
+        shutil.copytree(src, out, ignore=shutil.ignore_patterns(".*"))
+    write_viewer_features(vd)
+
+
+def write_viewer_features(vd: Path) -> None:
+    """features.json: which optional viewer files exist, so the page only requests those (no 404s)."""
+    sounds = sorted(p.name for p in (vd / "sounds").glob("*.mp3")) if (vd / "sounds").is_dir() else []
+    features = {
+        "collision": (vd / "collision.json").is_file(),
+        "model": (vd / "models" / "car.json").is_file(),
+        "sounds": sounds,
+    }
+    (vd / "features.json").write_text(json.dumps(features))
 
 
 class Fmt(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -276,7 +313,7 @@ def cmd_recon(args) -> None:
 
 def cmd_view(args) -> None:
     vd = need_recon(args.name, "viewer/scene.ply", "viewer/path.json") / "viewer"
-    (vd / "index.html").write_bytes(viewer_html().read_bytes())
+    install_viewer(vd)
     try:
         srv = serve.make_server(vd, args.port)
     except OSError as e:

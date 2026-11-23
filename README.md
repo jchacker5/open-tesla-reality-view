@@ -14,7 +14,16 @@ never leaves your machine.
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d7bff)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-3ecf8e)](CONTRIBUTING.md)
 
-<!-- media: demo video + screenshots land here (docs/media/) -->
+<img src="docs/media/hero.gif" alt="Chase-cam replay of a real drive rebuilt as a Gaussian splat from a Tesla's dashcam cameras: houses along the road, a car model on the reconstructed street, a blue path ribbon ahead, speed in the corner" width="760">
+
+<sub>A real 20-second drive at about 28 mph, rebuilt from a 4-camera (HW3) car's dashcam footage.</sub>
+
+<img src="docs/media/driver.jpg" alt="Driver-seat view inside the reconstruction: wooden triple-decker houses, power lines and parked cars along a two-lane street, speed and steering angle in the corner" width="760">
+
+<sub>Same drive from the driver's seat. Everything you see is the splat, not video.</sub>
+
+Built by **Joe Defendre** ([@JoeDefendre on X](https://x.com/JoeDefendre)) as a weekend project, in
+public. [Follow the build thread](https://x.com/Joedefendre/status/2124615749792567663).
 
 </div>
 
@@ -215,6 +224,17 @@ folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open i
 - Telemetry needs Tesla firmware 2025.44.25+ on HW3/HW4. Older clips still reconstruct, just
   without the HUD.
 
+## Known limitations
+
+This is an offline reconstruction of a drive you already recorded, not a live in-car view like
+Tesla's own visualisation. Where it falls short today:
+
+- **Static world only.** Moving cars and people are masked out or smear; they are not rebuilt.
+- **Haze off the driven path.** The cameras only see the street from the road, so sidewalks,
+  side streets and anything far from the car's path turn into soft, streaky splats.
+- **Short windows.** One 20-60 s clip per scene; stitching longer drives is on the roadmap.
+- **macOS on Apple silicon.** Linux and Windows are untested.
+
 ## Roadmap
 
 - [ ] Dynamic actors: moving cars and buses as their own splats (drivestudio / OmniRe, CUDA)
@@ -242,3 +262,9 @@ Built on [COLMAP](https://colmap.github.io/), [Brush](https://github.com/ArthurB
 
 Community project, **not affiliated with or endorsed by Tesla, Inc.** "Tesla" is a trademark of
 Tesla, Inc. MIT licensed.
+
+## Author
+
+**Joe Defendre**: [@JoeDefendre on X](https://x.com/JoeDefendre) ·
+[GitHub](https://github.com/jchacker5). Questions, results from your own car, or ideas: open an
+issue or reach out on X.

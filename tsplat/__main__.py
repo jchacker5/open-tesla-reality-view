@@ -9,6 +9,7 @@ otrv egomask                               optional, once: mask your car's body 
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
 otrv clean drive1                          re-run the post-train prune + dehaze with other thresholds
+otrv collision drive1                      re-bake drive mode's ground + wall grids (recon does it too)
 otrv view drive1                           open the replay viewer
 """
 
@@ -27,7 +28,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, clean, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
+from . import bench, brush, clean, collision, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -303,6 +304,13 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("name", help="run name")
     add_clean_args(a)
 
+    a = cmd(
+        "collision",
+        "bake viewer/collision.json for drive mode from the splat: ground height (0.5 m cells) and distance "
+        "to walls (0.25 m cells) within 12 m of the path (seconds; recon and clean run it too)",
+    )
+    a.add_argument("name", help="run name")
+
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
     a.add_argument("--note", default="", help="what changed in this run (the lever being tested)")
@@ -438,6 +446,9 @@ def cmd_recon(args) -> None:
     rules = clean_rules(args, args.sky)
     recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, brush_args, rules)
     timings["train"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    collision.run(work)
+    timings["collision"] = time.perf_counter() - t0
     timings_path.write_text(json.dumps({k: round(v, 1) for k, v in timings.items()}))
     (work / "recon_args.json").write_text(
         json.dumps(
@@ -473,6 +484,8 @@ def cmd_clean(args) -> None:
         raise SystemExit(f"{args.name} has no trained splat (viewer/scene_raw.ply): run `otrv recon {args.name}` first")
     rules = clean_rules(args, rargs.get("sky"))
     clean.run(work, src, rules)
+    if (work / "viewer" / "path.json").exists():
+        collision.run(work)  # walls and ground follow the splats that are left
     if rargs:  # the card's config should describe the scene that's now in viewer/
         rargs["clean"] = dataclasses.asdict(rules)
         recon_args_path.write_text(json.dumps(rargs))
@@ -547,6 +560,8 @@ def dispatch(args) -> None:
         cmd_recon(args)
     elif c == "clean":
         cmd_clean(args)
+    elif c == "collision":
+        collision.run(need_recon(args.name, "viewer/scene.ply", "viewer/path.json"))
     elif c == "bench":
         work = need_prep(args.name)
         if not recon_attempted(work):

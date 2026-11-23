@@ -35,6 +35,7 @@ def stubbed(tmp_path, monkeypatch):
         calls["train"] = {"steps": steps, "eval_every": eval_every, "extra": list(extra)}
 
     monkeypatch.setattr(cli.recon, "train", train)
+    monkeypatch.setattr(cli.collision, "run", lambda *a, **k: calls.setdefault("collision", True))
     return work, calls
 
 
@@ -60,7 +61,7 @@ def test_every_recon_flag_is_recorded_in_recon_args(stubbed):
     assert not missing, f"recon flags not in recon_args.json: {missing}"
     assert rec["color_norm"] is True and rec["dense_init"] is True and "clean" in rec
     assert calls["color_norm"] and calls["dense_init"] and calls["sky"] == "alpha"
-    assert calls["train"]["eval_every"] == 8
+    assert calls["train"]["eval_every"] == 8 and calls["collision"]  # baked after training
 
 
 def test_recon_args_reach_brush(stubbed):

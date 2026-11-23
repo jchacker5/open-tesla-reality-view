@@ -54,6 +54,22 @@
   .meta .date { color: var(--text); font-size: 12px; }
   .toast { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); background: rgba(16,18,22,.92); border: 1px solid var(--line);
     border-radius: 8px; padding: 7px 12px; font: 12px var(--mono); z-index: 5; pointer-events: none; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; letter-spacing: .08em; padding: 0 14px; }
+  button.primary:hover { filter: brightness(1.12); }
+  button.primary.on, button.primary[aria-pressed="true"] { background: #fff; color: #0b0d10; border-color: #fff; }
+  .minimap { position: absolute; right: 18px; bottom: 92px; width: 150px; height: 150px; border-radius: 50%; pointer-events: none;
+    background: rgba(10,12,15,.72); box-shadow: 0 0 0 1px var(--line), 0 6px 24px rgba(0,0,0,.4); z-index: 2; }
+  .edge { position: absolute; inset: 0; pointer-events: none; z-index: 1;
+    background: repeating-linear-gradient(45deg, rgba(245,165,36,.28) 0 10px, transparent 10px 22px);
+    -webkit-mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); }
+  .edge span { position: absolute; left: 50%; top: 56px; transform: translateX(-50%); font: 11px var(--mono); color: var(--warn);
+    background: rgba(16,18,22,.85); border: 1px solid rgba(245,165,36,.5); padding: 3px 8px; border-radius: 4px; letter-spacing: .06em; }
+  .tDrive { position: absolute; left: 0; right: 0; bottom: 96px; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 18px; z-index: 3; pointer-events: none; }
+  .tStick { width: 120px; height: 120px; border-radius: 50%; background: rgba(16,18,22,.5); border: 1px solid var(--line); display: grid; place-items: center; pointer-events: auto; touch-action: none; }
+  .tKnob { width: 52px; height: 52px; border-radius: 50%; background: rgba(232,234,238,.85); }
+  .tBtns { display: flex; gap: 10px; pointer-events: auto; }
+  .tBtns button { width: 64px; height: 64px; border-radius: 50%; background: rgba(16,18,22,.6); touch-action: none; font-weight: 700; }
+  .tBtns button.on { background: var(--accent); border-color: var(--accent); }
   /* flags */
   .app.clean, .app.noui { grid-template-columns: 1fr; }
   .app.clean .side, .app.clean .meta { display: none; }
@@ -136,8 +152,15 @@
             <svg class="sig" id="sigR" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M14 4l8 8-8 8v-5H2V9h12z"/></svg>
           </div>
           <div class="chips" id="chips"></div>
+          <div class="chips"><span class="chip" id="padChip" hidden>🎮 controller connected</span></div>
         </div>
         <div class="toast" id="toast" role="status" hidden></div>
+        <div class="edge" id="edge" hidden><span>edge of the reconstruction</span></div>
+        <canvas class="minimap" id="minimap" width="300" height="300" hidden aria-label="Minimap"></canvas>
+        <div class="tDrive" id="tDrive" hidden>
+          <div class="tStick" id="tStick" aria-label="Steering"><div class="tKnob" id="tKnob"></div></div>
+          <div class="tBtns"><button id="tHb" aria-label="Handbrake">HB</button><button id="tBrake" aria-label="Brake / reverse">BRK</button><button id="tGas" aria-label="Accelerate">GAS</button></div>
+        </div>
         <div class="meta" id="meta"><div class="date" id="date"></div><div id="metaSub"></div></div>
       </div>
     </div>
@@ -155,7 +178,9 @@
         <button id="mChase" class="on" title="Chase camera">chase</button>
         <button id="mDriver" title="Driver view">driver</button>
         <button id="mFree" title="Free orbit">free</button>
+        <button id="mDrive" class="primary" title="Drive the car yourself (4 / gamepad Start)">DRIVE</button>
         <button id="share" title="Copy a link to this moment">link</button>
+        <button id="mute" title="Mute (M)" aria-pressed="false">🔇</button>
       </div>
     </div>
   </main>
@@ -406,7 +431,7 @@ const mats = {
   rim: new THREE.MeshStandardMaterial({ color: 0x5a5f67, metalness: 0.75, roughness: 0.32 }),
   rimDark: new THREE.MeshStandardMaterial({ color: 0x1d2024, metalness: 0.5, roughness: 0.5 }),
   // lamps skip tone mapping so lit lamps stay saturated (AgX would wash bright red out to pink)
-  tail: new THREE.MeshStandardMaterial({ color: 0x1c0204, emissive: 0xff0a14, emissiveIntensity: 0.5, roughness: 0.2, toneMapped: false }),
+  tail: new THREE.MeshStandardMaterial({ color: 0x1c0204, emissive: 0xff0a14, emissiveIntensity: 0.5, roughness: 0.55, toneMapped: false }),
   lens: new THREE.MeshPhysicalMaterial({ color: 0x0b0d11, roughness: 0.08, metalness: 0.2, clearcoat: 1 }),
   drl: new THREE.MeshBasicMaterial({ color: 0xeef4ff, toneMapped: false }),
   amberF: new THREE.MeshStandardMaterial({ color: 0x121317, emissive: 0xff9a10, emissiveIntensity: 0, roughness: 0.2, toneMapped: false }),
@@ -760,9 +785,17 @@ function setMode(m) {
   if (m === mode) return;
   startBlend();
   intro = null;
+  const prev = mode;
   mode = m;
-  for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
+  for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"], ["mDrive", "drive"]]) {
+    $(id).classList.toggle("on", n === m);
+    $(id).setAttribute("aria-pressed", String(n === m));
+  }
   controls.enabled = m === "free";
+  // touch: let the page scroll vertically over the canvas except where the canvas needs every gesture
+  renderer.domElement.style.touchAction = m === "free" || m === "drive" ? "none" : "pan-y";
+  if (prev === "drive") driveExit();
+  if (m === "drive") driveEnter();
   if (m === "free") { const ps = poseAt(clock); placeFree(ps.carPos, ps.f, false); }
   resetView(false);
 }
@@ -773,6 +806,8 @@ function resetView(recentre = true) {
 $("mChase").onclick = () => setMode("chase");
 $("mDriver").onclick = () => setMode("driver");
 $("mFree").onclick = () => setMode("free");
+$("mDrive").onclick = () => setMode(mode === "drive" ? "chase" : "drive");
+renderer.domElement.style.touchAction = "pan-y"; // OrbitControls forces "none" on construction
 
 // follow-mode orbit / zoom: drag (any button) orbits, wheel / pinch zooms, double-click resets
 {
@@ -857,10 +892,35 @@ let clock = 0, playing = false, rate = 1, last = performance.now();
 const RATES = [0.5, 1, 2, 4];
 $("play").onclick = togglePlay;
 $("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; videos.forEach((v) => v.playbackRate = rate); };
+// keyboard: Space play (horn while driving) · <- / -> +-2 s (steer while driving) · 1/2/3/4 modes ·
+// U UI · F fullscreen · M mute · R reset view · H horn · V cycle camera · L headlights · P pause drive
 addEventListener("keydown", (e) => {
-  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
-  if (e.code === "KeyU") setUi(!uiOn); // H is the horn in drive mode
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const onRange = e.target?.type === "range", drv = mode === "drive";
+  if (e.target?.tagName === "BUTTON" && (e.code === "Space" || e.code === "Enter")) return; // let buttons click
+  keys.add(e.code);
+  switch (e.code) {
+    case "Space": e.preventDefault(); if (!drv) togglePlay(); break;
+    case "ArrowLeft": case "ArrowRight":
+      if (drv) e.preventDefault();
+      else if (!onRange) { e.preventDefault(); seek(clock + (e.code === "ArrowLeft" ? -2 : 2)); }
+      break;
+    case "ArrowUp": case "ArrowDown": if (drv) e.preventDefault(); break;
+    case "Digit1": setMode("chase"); break;
+    case "Digit2": setMode("driver"); break;
+    case "Digit3": setMode("free"); break;
+    case "Digit4": setMode(drv ? "chase" : "drive"); break;
+    case "KeyU": setUi(!uiOn); break;
+    case "KeyF": if (document.fullscreenElement) document.exitFullscreen?.(); else $("stage").requestFullscreen?.().catch(() => {}); break;
+    case "KeyM": sound.toggleMute(); break;
+    case "KeyR": resetView(true); break;
+    case "KeyV": cycleCamera(); break;
+    case "KeyL": if (drv) setHeadlights(!drive.headlights); break;
+    case "KeyP": if (drv) { playingDrive = !playingDrive; toast(playingDrive ? "Driving" : "Paused"); } break;
+  }
 });
+addEventListener("keyup", (e) => keys.delete(e.code));
+addEventListener("blur", () => keys.clear());
 $("share").onclick = async () => {
   const url = `${location.origin}${location.pathname}${location.search}#t=${clock.toFixed(1)}&cam=${mode}`;
   history.replaceState(null, "", url);
@@ -998,6 +1058,541 @@ function updateKeyLight() {
   key.target.position.copy(car.position);
 }
 
+// =================================================================================================
+// ---- Drive mode: drive the white car freely around the reconstruction ----
+// Arcade slip-angle bicycle model at a fixed 120 Hz (accumulator, rendered interpolated), metres and
+// seconds internally, converted to scene units with M. Ground + walls come from an optional
+// collision.json (bilinear lookups); without it the recorded path is the ground and a soft corridor
+// (~9 m soft / 11 m hard from the path) keeps the car where the splat actually exists.
+//
+// Ground frame (shared with collision.json): Y = path.json "up"; Z = the horizontal part of the first
+// path.json heading (frames[0].f with its up component removed, normalised); X = Y x Z. A scene point P
+// has ground coordinates (x, y, z) = (P.X, P.Y, P.Z), all in SCENE UNITS (not metres). collision.json:
+//   { "cell": c, "x0", "z0", "nx", "nz", "height": [nz*nx, row-major: height[j*nx + i] at x = x0 + i*c,
+//     z = z0 + j*c, value = ground y], "wallCell", "wx0", "wz0", "wnx", "wnz",
+//     "wallDist": [wnz*wnx row-major, distance in scene units to the nearest wall; <= 0 inside walls] }
+// =================================================================================================
+const GY = UP.clone();
+const GZ = frames[0].f.clone().addScaledVector(UP, -frames[0].f.dot(UP)).normalize();
+const GX = new THREE.Vector3().crossVectors(GY, GZ).normalize();
+const toGround = (P) => ({ x: P.dot(GX) / M, z: P.dot(GZ) / M, h: P.dot(GY) }); // x, z metres; h scene units
+const fromGround = (x, z, h, out = new THREE.Vector3()) => out.copy(GX).multiplyScalar(x * M).addScaledVector(GZ, z * M).addScaledVector(GY, h);
+// recorded road resampled every ~1 m, in ground coordinates
+const GP = (() => {
+  const pts = [];
+  let next = 0;
+  for (let i = 0; i < ARC.pts.length; i++) if (ARC.s[i] >= next || i === ARC.pts.length - 1) { pts.push(toGround(ARC.pts[i])); next = ARC.s[i] + 1; }
+  if (pts.length < 2) { const f = toGround(ARC.pts[0].clone().addScaledVector(frames[0].f, M)); pts.push(f); }
+  return pts;
+})();
+// nearest point on the recorded road: lateral distance d (m), road height h (units), tangent (tx, tz)
+function pathQuery(x, z, hint = -1) {
+  let lo = 0, hi = GP.length - 2;
+  if (hint >= 0) { lo = Math.max(0, hint - 40); hi = Math.min(GP.length - 2, hint + 40); }
+  let best = Infinity, out = null;
+  for (let i = lo; i <= hi; i++) {
+    const a = GP[i], b = GP[i + 1], ex = b.x - a.x, ez = b.z - a.z, l2 = ex * ex + ez * ez || 1e-9;
+    const u = clamp(((x - a.x) * ex + (z - a.z) * ez) / l2, 0, 1);
+    const px = a.x + ex * u, pz = a.z + ez * u, d2 = (x - px) ** 2 + (z - pz) ** 2;
+    if (d2 < best) { best = d2; const l = Math.sqrt(l2); out = { i, d: Math.sqrt(d2), h: a.h + (b.h - a.h) * u, px, pz, tx: ex / l, tz: ez / l }; }
+  }
+  return out;
+}
+let COLL = null, collTried = false;
+async function loadCollision() {
+  if (collTried) return;
+  collTried = true;
+  try {
+    const r = await fetch("collision.json");
+    if (r.ok) { COLL = await r.json(); toast("collision.json loaded: ground + walls"); }
+  } catch {}
+}
+function bilinear(arr, nx, nz, x0, z0, cell, gx, gz) {
+  const fx = clamp((gx - x0) / cell, 0, nx - 1.001), fz = clamp((gz - z0) / cell, 0, nz - 1.001);
+  const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
+  const a = arr[j * nx + i], b = arr[j * nx + i + 1], c = arr[(j + 1) * nx + i], d = arr[(j + 1) * nx + i + 1];
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+// ground height (scene units) at ground metres (x, z)
+function groundH(x, z, hint) {
+  if (COLL?.height) return bilinear(COLL.height, COLL.nx, COLL.nz, COLL.x0, COLL.z0, COLL.cell, x * M, z * M);
+  return pathQuery(x, z, hint).h;
+}
+const wallDistM = (x, z) => bilinear(COLL.wallDist, COLL.wnx, COLL.wnz, COLL.wx0, COLL.wz0, COLL.wallCell, x * M, z * M) / M;
+
+const DRV = { L: CAR.wheelZ * 2, mass: 1900, force: 14000, vmax: 50, brake: 12, revMax: 12, track: 1.6, hz: 120,
+  soft: 9, hard: 11, respawn: 3 };
+const drive = { x: 0, z: 0, psi: 0, vx: 0, vz: 0, r: 0, delta: 0, yAbs: 0, yv: 0, spin: 0, aLong: 0, aLat: 0,
+  slip: 0, brakeLit: false, gear: "D", out: 0, hint: 0, steps: 0, acc: 0, prev: null, shake: 0, lookBehind: false, stopT: 0, bounds: true, u: 0,
+  cam: "chase", headlights: false, input: { throttle: 0, brake: 0, steer: 0, handbrake: false, boost: false } };
+function driveReset(t = clock, speed = null) {
+  const ps = poseAt(t), g = toGround(ps.carPos);
+  const s = telAt(t), u = speed ?? (s ? s.mph / 2.23694 : 0);
+  Object.assign(drive, { x: g.x, z: g.z, psi: Math.atan2(ps.f.dot(GX), ps.f.dot(GZ)), r: 0, delta: 0, yAbs: g.h / M, yv: 0,
+    aLong: 0, aLat: 0, slip: 0, out: 0, acc: 0, steps: 0, hint: -1, stopT: 0, u, gear: "D" });
+  drive.vx = Math.sin(drive.psi) * u; drive.vz = Math.cos(drive.psi) * u;
+  drive.hint = pathQuery(drive.x, drive.z).i;
+  drive.prev = snapDrive();
+}
+const snapDrive = () => ({ x: drive.x, z: drive.z, psi: drive.psi, yAbs: drive.yAbs, pitch: drive.pitch ?? 0, roll: drive.roll ?? 0 });
+function onImpact(speed) {
+  drive.shake = Math.min(1, speed / 8);
+  rumble(Math.min(1, speed / 10), 160);
+  sound.impact?.(Math.min(1, speed / 10));
+}
+// one fixed physics step; inp = { throttle 0..1, brake 0..1, steer -1..1 (+left), handbrake, boost }
+function driveStep(h, inp) {
+  const sinP = Math.sin(drive.psi), cosP = Math.cos(drive.psi);
+  let u = drive.vx * sinP + drive.vz * cosP;   // forward speed
+  let w = drive.vx * cosP - drive.vz * sinP;   // lateral (left) speed
+  // steering: 32 deg below 5 m/s easing to 6 deg at 45 m/s; smoothed 6/s in, 10/s release
+  const dMax = THREE.MathUtils.degToRad(32 + (6 - 32) * clamp((Math.abs(u) - 5) / 40, 0, 1));
+  const dT = clamp(inp.steer, -1, 1) * dMax;
+  drive.delta += (dT - drive.delta) * (1 - Math.exp(-(Math.abs(dT) > Math.abs(drive.delta) ? 6 : 10) * h));
+  // longitudinal: 14 kN tapering to 0 at 50 m/s, 12 m/s2 brakes, brake held at a stop = reverse (<= 12 m/s)
+  let a = 0;
+  const thr = clamp(inp.throttle, 0, 1), brk = clamp(inp.brake, 0, 1);
+  if (u < -0.5 && thr > 0) a += DRV.brake * thr;                        // throttle while rolling back = brake
+  else a += (DRV.force * (inp.boost ? 1.3 : 1) * thr * Math.max(0, 1 - u / DRV.vmax)) / DRV.mass;
+  if (!(brk > 0 && u <= 0.5)) drive.stopT = 0;
+  if (brk > 0) {
+    if (u > 0.5) a -= DRV.brake * brk;
+    else if ((drive.stopT += h) > 0.35) a -= (DRV.force * 0.6 * brk * Math.max(0, 1 + u / DRV.revMax)) / DRV.mass; // reverse after a beat at standstill
+  }
+  a -= Math.sign(u) * (0.15 + 0.00045 * u * u);                         // rolling + aero drag
+  const uPrev = u;
+  u += a * h;
+  if (thr === 0 && brk === 0 && Math.abs(u) < 0.25) u = 0;
+  if (Math.sign(u) !== Math.sign(uPrev) && uPrev !== 0 && thr === 0 && brk > 0 && uPrev > 0) u = 0; // brakes stop, don't reverse instantly
+  // lateral grip decay (handbrake frees the rear = drift); yaw from the bicycle model
+  w *= Math.exp(-(inp.handbrake ? 9 / 1.8 : 9) * h);
+  const rKin = (u / DRV.L) * Math.tan(drive.delta) * (inp.handbrake ? 1.4 : 1);
+  drive.r += (rKin - drive.r) * (1 - Math.exp(-14 * h));
+  drive.psi += drive.r * h;
+  // countersteer assist: pull the heading toward the velocity direction while sliding forward
+  if (u > 2 && Math.abs(w) > 0.2) {
+    const velAng = Math.atan2(drive.vx, drive.vz);
+    let dPsi = velAng - drive.psi;
+    dPsi = Math.atan2(Math.sin(dPsi), Math.cos(dPsi));
+    drive.psi += dPsi * (1 - Math.exp(-3 * h)) * clamp(Math.abs(w) / 3, 0, 1);
+  }
+  // world velocity from the (old-frame) forward/lateral split: heading changes create slip
+  drive.vx = sinP * u + cosP * w;
+  drive.vz = cosP * u - sinP * w;
+  drive.aLong = drive.aLong + (a - drive.aLong) * (1 - Math.exp(-6 * h));
+  drive.aLat = drive.aLat + (u * drive.r - drive.aLat) * (1 - Math.exp(-6 * h));
+  drive.slip = Math.abs(w);
+  drive.x += drive.vx * h;
+  drive.z += drive.vz * h;
+  // bounds: collision.json walls, else a soft corridor around the recorded path
+  drive.steps++;
+  const q = pathQuery(drive.x, drive.z, drive.steps % 60 === 0 ? -1 : drive.hint);
+  drive.hint = q.i;
+  drive.edge = 0;
+  if (!drive.bounds) { /* test hook: no walls */ } else if (COLL?.wallDist) {
+    const d = wallDistM(drive.x, drive.z) - 1;
+    drive.edge = clamp(1 - (d + 1) / 4, 0, 1);
+    if (d < 0) {
+      const e = 0.25, gx = wallDistM(drive.x + e, drive.z) - wallDistM(drive.x - e, drive.z), gz = wallDistM(drive.x, drive.z + e) - wallDistM(drive.x, drive.z - e);
+      const gl = Math.hypot(gx, gz) || 1, nx = gx / gl, nz = gz / gl;
+      drive.x -= nx * d; drive.z -= nz * d;
+      const vn = drive.vx * nx + drive.vz * nz;
+      if (vn < 0) { drive.vx -= nx * vn * 1.3; drive.vz -= nz * vn * 1.3; onImpact(-vn); }
+    }
+  } else if (q.d > DRV.soft && drive.bounds) {
+    const nx = (drive.x - q.px) / q.d, nz = (drive.z - q.pz) / q.d, over = q.d - DRV.soft;
+    const push = 1.6 * over * over;                                      // soft wall, force ~ overshoot^2
+    drive.vx -= nx * push * h; drive.vz -= nz * push * h;
+    if (q.d > DRV.hard) {                                                // hard wall
+      drive.x = q.px + nx * DRV.hard; drive.z = q.pz + nz * DRV.hard;
+      const vn = drive.vx * nx + drive.vz * nz;
+      if (vn > 0) { drive.vx -= nx * vn * 1.3; drive.vz -= nz * vn * 1.3; onImpact(vn); }
+    }
+  }
+  if (!COLL?.wallDist) drive.edge = clamp((q.d - (DRV.soft - 3)) / 3, 0, 1);
+  drive.out = drive.bounds && !COLL?.wallDist && q.d > DRV.soft ? drive.out + h : 0;
+  if (drive.out > DRV.respawn) {                                          // auto-respawn on the path
+    drive.x = q.px; drive.z = q.pz; drive.psi = Math.atan2(q.tx, q.tz); drive.vx = drive.vz = drive.r = 0; drive.out = 0;
+    drive.yAbs = groundH(drive.x, drive.z, q.i) / M; drive.yv = 0;
+    toast("Back on the reconstructed road");
+  }
+  // ground: four samples (+-1.45 m fore/aft, +-0.8 m lateral) give height, pitch and roll
+  const sp = Math.sin(drive.psi), cp = Math.cos(drive.psi);
+  const H = (f, l) => groundH(drive.x + sp * f + cp * l, drive.z + cp * f - sp * l, drive.hint) / M;
+  const hf = (H(1.45, 0.8) + H(1.45, -0.8)) / 2, hb = (H(-1.45, 0.8) + H(-1.45, -0.8)) / 2;
+  const hl = (H(1.45, 0.8) + H(-1.45, 0.8)) / 2, hr = (H(1.45, -0.8) + H(-1.45, -0.8)) / 2;
+  const hc = (hf + hb) / 2;
+  drive.pitch = -Math.atan2(hf - hb, 2.9);
+  drive.roll = Math.atan2(hl - hr, 1.6);
+  // ride height: spring k 60, damping ratio 0.5
+  drive.yv += (-60 * (drive.yAbs - hc) - 2 * 0.5 * Math.sqrt(60) * drive.yv) * h;
+  drive.yAbs += drive.yv * h;
+  const speed = Math.hypot(drive.vx, drive.vz);
+  drive.spin += (u / CAR.wheelR) * h;
+  drive.brakeLit = brk > 0.05 && u > 0.3;
+  drive.gear = u < -0.2 || (Math.abs(u) <= 0.2 && brk > 0.05 && thr === 0) ? "R" : "D";
+  drive.u = u; drive.speed = speed; drive.d = q.d;
+}
+function driveAdvance(dt, inp) {
+  const H = 1 / DRV.hz;
+  drive.acc += dt;
+  let n = 0;
+  while (drive.acc >= H && n < 60) { drive.prev = snapDrive(); driveStep(H, inp); drive.acc -= H; n++; }
+  if (n === 60) drive.acc = 0;
+}
+// test hook: advance the model by dt seconds (fixed 120 Hz steps) with an explicit input
+window.otrvDrive = {
+  get state() { return { x: drive.x, z: drive.z, heading: drive.psi, speed: drive.u ?? 0, steer: drive.delta, gear: drive.gear, yawRate: drive.r, distFromPath: drive.d ?? 0 }; },
+  reset: (t, speed) => driveReset(t ?? clock, speed),
+  set bounds(on) { drive.bounds = !!on; },
+  step(dt, input = {}) {
+    if (!drive.prev) driveReset();
+    const inp = { throttle: 0, brake: 0, steer: 0, handbrake: false, boost: false, ...input };
+    const n = Math.round(dt * DRV.hz);
+    for (let i = 0; i < n; i++) { drive.prev = snapDrive(); driveStep(1 / DRV.hz, inp); }
+    return this.state;
+  },
+};
+
+// headlight beams laid on the road (the splats ignore real lights, so fake the pool of light)
+const beams = (() => {
+  const c = document.createElement("canvas"); c.width = 128; c.height = 256;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(64, 250, 4, 64, 250, 250);
+  grd.addColorStop(0, "rgba(255,248,230,0.9)"); grd.addColorStop(0.5, "rgba(255,248,230,0.25)"); grd.addColorStop(1, "rgba(255,248,230,0)");
+  g.fillStyle = grd;
+  g.beginPath(); g.moveTo(52, 256); g.lineTo(0, 0); g.lineTo(128, 0); g.lineTo(76, 256); g.closePath(); g.filter = "blur(6px)"; g.fill();
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(9, 18), new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.55,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  m.rotation.x = -Math.PI / 2; m.rotation.z = Math.PI;
+  m.position.set(0, 0.04, 2.3 + 9);
+  m.renderOrder = 11; m.visible = false;
+  car.add(m);
+  return m;
+})();
+function setHeadlights(on) { drive.headlights = on; beams.visible = on; mats.drl.color.setScalar(on ? 1.25 : 0.93); }
+
+// ---- input: keyboard (smoothed to analog), gamepad (standard mapping only), touch ----
+const keys = new Set();
+const kb = { steer: 0, thr: 0, brk: 0 };
+const touch = { steer: 0, thr: 0, brk: 0, hb: false };
+const padPrev = [];
+let padActive = false;
+function rumble(strength, ms) {
+  for (const pad of navigator.getGamepads?.() ?? []) {
+    try { pad?.vibrationActuator?.playEffect("dual-rumble", { duration: ms, strongMagnitude: strength, weakMagnitude: strength * 0.6 }); } catch {}
+  }
+}
+const deadzone = (x, y, dz = 0.12) => { const m = Math.hypot(x, y); if (m < dz) return [0, 0]; const s = (m - dz) / (1 - dz) / m; return [x * s, y * s]; };
+function readInput(dt) {
+  const k = (...c) => c.some((x) => keys.has(x));
+  const approach = (cur, target, up, down) => cur + (target - cur) * (1 - Math.exp(-(Math.abs(target) > Math.abs(cur) ? up : down) * dt));
+  const st = (k("KeyA", "ArrowLeft") ? 1 : 0) - (k("KeyD", "ArrowRight") ? 1 : 0);
+  kb.steer = approach(kb.steer, st, 5, 9);
+  kb.thr = approach(kb.thr, k("KeyW", "ArrowUp") ? 1 : 0, 6, 10);
+  kb.brk = approach(kb.brk, k("KeyS", "ArrowDown") ? 1 : 0, 8, 12);
+  const inp = { throttle: Math.max(kb.thr, touch.thr), brake: Math.max(kb.brk, touch.brk), steer: Math.abs(touch.steer) > Math.abs(kb.steer) ? touch.steer : kb.steer,
+    handbrake: k("KeyX") || touch.hb, boost: k("ShiftLeft", "ShiftRight") };
+  let horn = k("KeyH") || (mode === "drive" && k("Space"));
+  drive.lookBehind = k("KeyC");
+  // gamepads: poll every frame (never cache the Gamepad objects); trust only the standard mapping
+  for (const pad of navigator.getGamepads?.() ?? []) {
+    if (!pad || pad.mapping !== "standard") continue;
+    const b = (i) => pad.buttons[i] ?? { pressed: false, value: 0 };
+    const prev = padPrev[pad.index] ?? [];
+    const edge = (i) => b(i).pressed && !prev[i];
+    const [lx] = deadzone(pad.axes[0] ?? 0, pad.axes[1] ?? 0);
+    const steer = -Math.sign(lx) * Math.abs(lx) ** 1.5;
+    if (Math.abs(steer) > Math.abs(inp.steer)) inp.steer = steer;
+    inp.throttle = Math.max(inp.throttle, b(7).value);
+    inp.brake = Math.max(inp.brake, b(6).value);
+    inp.handbrake ||= b(2).pressed || b(5).pressed;
+    horn ||= b(1).pressed;
+    drive.lookBehind ||= b(11).pressed;
+    const [rx, ry] = deadzone(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
+    if (rx || ry) { view.yaw -= rx * 2.6 * dt; view.pitch = clamp(view.pitch + ry * 1.6 * dt, -0.5, 0.9); view.idle = 0; }
+    if (edge(9)) setMode(mode === "drive" ? "chase" : "drive");                       // Start: drive on/off
+    if (edge(3)) cycleCamera();                                                         // Y: cycle camera
+    if (edge(0) && mode === "drive") setHeadlights(!drive.headlights);                  // A: headlights
+    if (edge(8) && mode !== "drive") togglePlay();                                      // Back: play/pause
+    if (mode === "drive" && b(6).value > 0.8 && (drive.u ?? 0) > 8 && drive.steps % 18 === 0) rumble(0.35, 90); // hard braking
+    padPrev[pad.index] = pad.buttons.map((x) => x.pressed);
+    if (!padActive && pad.buttons.some((x) => x.pressed)) padActive = true;
+  }
+  sound.horn(horn);
+  return inp;
+}
+addEventListener("gamepadconnected", (e) => {
+  $("padChip").hidden = false;
+  $("padChip").title = e.gamepad.id;
+  if (e.gamepad.mapping !== "standard") toast("Controller connected, but its button mapping isn't standard: it may not work");
+});
+addEventListener("gamepaddisconnected", () => { if (![...(navigator.getGamepads?.() ?? [])].some(Boolean)) $("padChip").hidden = true; });
+function cycleCamera() {
+  if (mode === "drive") { drive.cam = drive.cam === "chase" ? "hood" : "chase"; startBlend(0.5); return; }
+  setMode({ chase: "driver", driver: "free", free: "chase" }[mode] ?? "chase");
+}
+// touch controls (shown in drive mode on coarse pointers): left joystick steers, right buttons drive
+{
+  const stick = $("tStick"), knob = $("tKnob");
+  let id = null, cx = 0;
+  stick.addEventListener("pointerdown", (e) => { id = e.pointerId; cx = stick.getBoundingClientRect().left + stick.clientWidth / 2; stick.setPointerCapture(e.pointerId); move(e); });
+  const move = (e) => { if (e.pointerId !== id) return; const dx = clamp((e.clientX - cx) / (stick.clientWidth / 2), -1, 1); touch.steer = -Math.sign(dx) * Math.abs(dx) ** 1.3; knob.style.transform = `translateX(${dx * 34}px)`; };
+  stick.addEventListener("pointermove", move);
+  const end = (e) => { if (e.pointerId !== id) return; id = null; touch.steer = 0; knob.style.transform = ""; };
+  stick.addEventListener("pointerup", end); stick.addEventListener("pointercancel", end);
+  for (const [bid, key] of [["tGas", "thr"], ["tBrake", "brk"], ["tHb", "hb"]]) {
+    const el = $(bid);
+    el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); touch[key] = key === "hb" ? true : 1; el.classList.add("on"); });
+    const up = () => { touch[key] = key === "hb" ? false : 0; el.classList.remove("on"); };
+    el.addEventListener("pointerup", up); el.addEventListener("pointercancel", up);
+  }
+}
+
+// ---- drive camera: spring arm ~6 m back / 2.2 m up (half-life 0.12 s), leans with yaw rate, FOV
+// widens with speed; C / R3 looks behind; user orbit (drag / right stick) springs back after 2 s ----
+const driveCamS = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), ready: false };
+const _q = new THREE.Quaternion(), _qa = new THREE.Quaternion();
+function drivePose(out, carPos, fwd, dt) {
+  const u = drive.u ?? 0;
+  if (drive.cam === "hood") {
+    const eye = carPos.clone().addScaledVector(UP, 1.38 * M).addScaledVector(fwd, 0.75 * M);
+    const dir = fwd.clone().applyAxisAngle(UP, view.yaw + (drive.lookBehind ? Math.PI : 0));
+    return lookPose(out, eye, eye.clone().addScaledVector(dir, 10 * M).addScaledVector(UP, -0.5 * M), clamp(68 / view.zoom, 35, 90));
+  }
+  const back = fwd.clone().negate().applyAxisAngle(UP, view.yaw + (drive.lookBehind ? Math.PI : 0));
+  const len = Math.hypot(6, 2.2) * view.zoom, elev = clamp(Math.atan2(2.2, 6) + view.pitch, 0.04, 1.35);
+  const target = carPos.clone().addScaledVector(back, Math.cos(elev) * len * M).addScaledVector(UP, Math.sin(elev) * len * M);
+  if (!driveCamS.ready) { driveCamS.pos.copy(target); driveCamS.vel.set(0, 0, 0); driveCamS.ready = true; }
+  else springV3(driveCamS.pos, driveCamS.vel, target, 0.12, dt);
+  const look = carPos.clone().addScaledVector(back, -4 * M).addScaledVector(UP, 0.8 * M);
+  lookPose(out, driveCamS.pos, look, 60 + 15 * clamp(Math.abs(u) / 40, 0, 1));
+  out.quat.multiply(_qa.setFromAxisAngle(_v.set(0, 0, 1), clamp(-drive.r * 0.05, -0.07, 0.07)));
+  if (drive.shake > 0.01) { // impact shake
+    out.pos.addScaledVector(UP, (Math.random() - 0.5) * drive.shake * 0.25 * M).addScaledVector(fwd, (Math.random() - 0.5) * drive.shake * 0.25 * M);
+    drive.shake *= Math.exp(-6 * dt);
+  }
+  return out;
+}
+
+// ---- drive lifecycle ----
+function driveEnter() {
+  setPlaying(false);
+  loadCollision();
+  driveReset(clock);
+  driveCamS.ready = false;
+  drive.cam = "chase";
+  $("tDrive").hidden = !matchMedia("(pointer: coarse)").matches;
+  $("minimap").hidden = false;
+  toast(matchMedia("(pointer: coarse)").matches ? "Drive: joystick to steer, GAS / BRK" : "Drive: W/A/S/D or arrows · Shift boost · X handbrake · H horn · C look back", 3200);
+}
+function driveExit() {
+  $("tDrive").hidden = true;
+  $("minimap").hidden = true;
+  $("edge").hidden = true;
+  carBody.rotation.set(0, 0, 0);
+  carBody.position.set(0, 0, 0);
+  setHeadlights(false);
+  spark.minSortIntervalMs = 0;
+  sound.horn(false);
+}
+// place the car from the (interpolated) drive state
+const _dq = new THREE.Quaternion(), _euler = new THREE.Euler();
+function placeDriveCar() {
+  const p = drive.prev ?? snapDrive(), k = clamp(drive.acc * DRV.hz, 0, 1);
+  const lerp = (a, b) => a + (b - a) * k;
+  let dpsi = drive.psi - p.psi; dpsi = Math.atan2(Math.sin(dpsi), Math.cos(dpsi));
+  const psi = p.psi + dpsi * k;
+  const fwd = new THREE.Vector3().copy(GZ).multiplyScalar(Math.cos(psi)).addScaledVector(GX, Math.sin(psi));
+  fromGround(lerp(p.x, drive.x), lerp(p.z, drive.z), lerp(p.yAbs, drive.yAbs) * M, car.position);
+  headingQuat(fwd, car.quaternion);
+  // align to the ground slope (gently: half the measured pitch/roll), body roll/pitch from accelerations
+  car.quaternion.multiply(_dq.setFromEuler(_euler.set(lerp(p.pitch, drive.pitch ?? 0) * 0.5, 0, lerp(p.roll, drive.roll ?? 0) * 0.5)));
+  carBody.rotation.set(clamp(-0.03 * drive.aLong / 9.81, -0.05, 0.05), 0, clamp(0.04 * drive.aLat / 9.81, -0.06, 0.06));
+  egoHole.position.copy(car.position); egoHole.quaternion.copy(car.quaternion);
+  setCarSignals({ brake: drive.brakeLit, steer: drive.delta, t: performance.now() / 1000, spin: drive.spin });
+  return fwd;
+}
+// minimap: heading-up, recorded road + drivable corridor, hatched outside it
+const mm = $("minimap"), mmCtx = mm.getContext("2d");
+const hatch = (() => {
+  const c = document.createElement("canvas"); c.width = c.height = 8;
+  const g = c.getContext("2d"); g.strokeStyle = "rgba(245,165,36,.35)"; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(0, 8); g.lineTo(8, 0); g.stroke();
+  return mmCtx.createPattern(c, "repeat");
+})();
+function drawMinimap() {
+  const S = mm.width, scale = S / 160; // 160 m across
+  const sp = Math.sin(drive.psi), cp = Math.cos(drive.psi);
+  const proj = (pt) => { const dx = pt.x - drive.x, dz = pt.z - drive.z; return [S / 2 - (dx * cp - dz * sp) * scale, S / 2 - (dx * sp + dz * cp) * scale]; };
+  mmCtx.save();
+  mmCtx.clearRect(0, 0, S, S);
+  mmCtx.beginPath(); mmCtx.arc(S / 2, S / 2, S / 2 - 1, 0, Math.PI * 2); mmCtx.clip();
+  mmCtx.fillStyle = hatch; mmCtx.fillRect(0, 0, S, S);
+  mmCtx.lineJoin = mmCtx.lineCap = "round";
+  const line = () => { mmCtx.beginPath(); GP.forEach((pt, i) => { const [x, y] = proj(pt); i ? mmCtx.lineTo(x, y) : mmCtx.moveTo(x, y); }); };
+  line(); mmCtx.strokeStyle = "rgba(14,16,20,.96)"; mmCtx.lineWidth = DRV.soft * 2 * scale; mmCtx.stroke();
+  line(); mmCtx.strokeStyle = "rgba(61,123,255,.9)"; mmCtx.lineWidth = 2.5 * (S / 150); mmCtx.stroke();
+  mmCtx.restore();
+  mmCtx.fillStyle = "#fff";
+  mmCtx.beginPath(); mmCtx.moveTo(S / 2, S / 2 - 9 * (S / 150)); mmCtx.lineTo(S / 2 + 6 * (S / 150), S / 2 + 6 * (S / 150)); mmCtx.lineTo(S / 2, S / 2 + 2 * (S / 150)); mmCtx.lineTo(S / 2 - 6 * (S / 150), S / 2 + 6 * (S / 150)); mmCtx.closePath(); mmCtx.fill();
+}
+let edgeToastShown = false, mmFrame = 0;
+function driveFrame(rdt) {
+  const inp = readInput(rdt);
+  if (!playingDrive) inp.throttle = inp.brake = 0;
+  driveAdvance(rdt, inp);
+  spark.minSortIntervalMs = Math.abs(drive.u ?? 0) > 15 ? 16 : 0;
+  const fwd = placeDriveCar();
+  const p = newPose();
+  drivePose(p, car.position, fwd, rdt);
+  let pose = p;
+  if (blend) { blend.u = Math.min(1, blend.u + rdt / blend.dur); pose = mixPose(tmpPose, blend.from, p, easeInOut(blend.u)); if (blend.u >= 1) blend = null; }
+  if (view.idle > 2) { const kk = 1 - Math.exp(-3 * rdt); view.yaw -= view.yaw * kk; view.pitch -= view.pitch * kk; }
+  view.idle += rdt;
+  applyPose(pose);
+  renderHud({ mph: Math.abs(drive.u ?? 0) * 2.23694, gear: drive.gear, steer: THREE.MathUtils.radToDeg(drive.delta) * 15, ap: null,
+    brake: drive.brakeLit, blinkL: false, blinkR: false }, clock);
+  setHidden("edge", (drive.edge ?? 0) < 0.05);
+  if ((drive.edge ?? 0) >= 0.05) $("edge").style.opacity = String(0.35 + 0.65 * drive.edge);
+  if ((drive.d ?? 0) > DRV.soft && !COLL?.wallDist) { if (!edgeToastShown) { toast("Leaving reconstructed area", 2400); edgeToastShown = true; } }
+  else edgeToastShown = false;
+  if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(); // ~20 Hz is plenty
+  sound.update({ speed: Math.abs(drive.u ?? 0), throttle: inp.throttle, slip: drive.slip, reverse: drive.gear === "R" && Math.abs(drive.u ?? 0) > 0.05 || (drive.gear === "R" && inp.brake > 0.05), drive: true });
+}
+let playingDrive = true; // Start/pause inside drive mode (P key)
+// ---- sound: WebAudio, synthesised in code (no audio files shipped) ----
+// EV motor whine (two detuned oscillators at 200 + 9*speed Hz through a lowpass), wind (lowpassed
+// noise, gain ~ speed^2), tyre squeal (band-passed noise, gain from lateral slip), a two-tone horn
+// (square waves at 440 + 554 Hz) and an ORIGINAL reverse chime: a soft two-tone sine-plus-harmonics
+// pulse at ~1.2 Hz. Optional user overrides: drop sounds/horn.mp3 and/or sounds/reverse.mp3 next to
+// index.html (local-only, git-ignored; see viewer/sounds/README.md). Audio starts on the first user
+// interaction (autoplay policy); M or the speaker button mutes.
+const sound = (() => {
+  let ctx = null, master, whine, whineG, whineF, wind, windG, squealG, hornNodes = null, hornOn = false, nextChime = 0, chimeHi = false;
+  const user = { horn: null, reverse: null };
+  let reverseSrc = null, hornSrc = null;
+  let muted = false;
+  try { muted = localStorage.getItem("otrv.muted") === "1"; } catch {}
+  const noise = (c) => {
+    const b = c.createBuffer(1, c.sampleRate * 2, c.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const s = c.createBufferSource(); s.buffer = b; s.loop = true; s.start();
+    return s;
+  };
+  async function loadUser(name) {
+    try {
+      const h = await fetch(`sounds/${name}.mp3`, { method: "HEAD" });
+      if (!h.ok) return null;
+      return await ctx.decodeAudioData(await (await fetch(`sounds/${name}.mp3`)).arrayBuffer());
+    } catch { return null; }
+  }
+  function init() {
+    if (ctx || RENDER) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    ctx = new AC();
+    master = ctx.createGain(); master.gain.value = muted ? 0 : 0.9;
+    const comp = ctx.createDynamicsCompressor();
+    master.connect(comp).connect(ctx.destination);
+    whineF = ctx.createBiquadFilter(); whineF.type = "lowpass"; whineF.frequency.value = 1400; whineF.Q.value = 0.7;
+    whineG = ctx.createGain(); whineG.gain.value = 0;
+    whine = [ctx.createOscillator(), ctx.createOscillator()];
+    whine[0].type = "sawtooth"; whine[1].type = "triangle"; whine[1].detune.value = 11;
+    for (const o of whine) { o.frequency.value = 200; o.connect(whineF); o.start(); }
+    whineF.connect(whineG).connect(master);
+    const wf = ctx.createBiquadFilter(); wf.type = "lowpass"; wf.frequency.value = 380;
+    windG = ctx.createGain(); windG.gain.value = 0;
+    wind = noise(ctx); wind.connect(wf).connect(windG).connect(master);
+    const sf = ctx.createBiquadFilter(); sf.type = "bandpass"; sf.frequency.value = 1350; sf.Q.value = 7;
+    squealG = ctx.createGain(); squealG.gain.value = 0;
+    noise(ctx).connect(sf).connect(squealG).connect(master);
+    loadUser("horn").then((b) => (user.horn = b));
+    loadUser("reverse").then((b) => (user.reverse = b));
+    updateMuteUi();
+  }
+  const set = (param, v, tc = 0.06) => param.setTargetAtTime(v, ctx.currentTime, tc);
+  function chimePulse(t0) { // one soft blip: sine + gentle 2nd/3rd harmonics, alternating two pitches
+    const f = chimeHi ? 784 : 659; chimeHi = !chimeHi;
+    const g = ctx.createGain(); g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.16, t0 + 0.03); g.gain.exponentialRampToValueAtTime(0.0005, t0 + 0.32);
+    g.connect(master);
+    for (const [mul, amp] of [[1, 1], [2, 0.22], [3, 0.07]]) {
+      const o = ctx.createOscillator(), og = ctx.createGain();
+      o.type = "sine"; o.frequency.value = f * mul; og.gain.value = amp;
+      o.connect(og).connect(g); o.start(t0); o.stop(t0 + 0.36);
+    }
+  }
+  function reverse(on) {
+    if (user.reverse) {
+      if (on && !reverseSrc) { reverseSrc = ctx.createBufferSource(); reverseSrc.buffer = user.reverse; reverseSrc.loop = true; reverseSrc.connect(master); reverseSrc.start(); }
+      if (!on && reverseSrc) { reverseSrc.stop(); reverseSrc = null; }
+      return;
+    }
+    if (!on) { nextChime = 0; return; }
+    const now = ctx.currentTime;
+    if (nextChime < now) nextChime = now + 0.02;
+    while (nextChime < now + 0.1) { chimePulse(nextChime); nextChime += 1 / 1.2 / 2; } // two tones per 1.2 Hz cycle
+  }
+  function horn(on) {
+    if (!ctx || on === hornOn) return;
+    hornOn = on;
+    if (user.horn) {
+      if (on) { hornSrc = ctx.createBufferSource(); hornSrc.buffer = user.horn; hornSrc.connect(master); hornSrc.start(); }
+      else if (hornSrc) { try { hornSrc.stop(ctx.currentTime + 0.05); } catch {} hornSrc = null; }
+      return;
+    }
+    if (on) {
+      const g = ctx.createGain(), f = ctx.createBiquadFilter();
+      f.type = "lowpass"; f.frequency.value = 2200;
+      g.gain.setValueAtTime(0, ctx.currentTime); g.gain.linearRampToValueAtTime(0.16, ctx.currentTime + 0.015);
+      const os = [440, 554].map((hz) => { const o = ctx.createOscillator(); o.type = "square"; o.frequency.value = hz; o.connect(f); o.start(); return o; });
+      f.connect(g).connect(master);
+      hornNodes = { g, os };
+    } else if (hornNodes) {
+      const { g, os } = hornNodes; hornNodes = null;
+      g.gain.setTargetAtTime(0, ctx.currentTime, 0.02);
+      for (const o of os) o.stop(ctx.currentTime + 0.15);
+    }
+  }
+  function update({ speed = 0, throttle = 0, slip = 0, reverse: rev = false, drive = false, playing = true }) {
+    if (!ctx) return;
+    const active = drive || playing;
+    for (const o of whine) set(o.frequency, 200 + 9 * speed, 0.08);
+    set(whineF.frequency, 900 + 40 * speed, 0.1);
+    set(whineG.gain, active ? Math.min(0.05, 0.012 + 0.0016 * speed) * (drive ? 0.6 + 0.6 * throttle : 0.5) * (speed > 0.3 ? 1 : 0) : 0, 0.1);
+    set(windG.gain, drive ? Math.min(0.5, 0.00028 * speed * speed) : 0, 0.15);
+    set(squealG.gain, drive ? clamp((slip - 1.2) * 0.05, 0, 0.12) : 0, 0.05);
+    reverse(active && rev);
+  }
+  function impact(s) {
+    if (!ctx) return;
+    const g = ctx.createGain(), f = ctx.createBiquadFilter(), src = ctx.createBufferSource();
+    const b = ctx.createBuffer(1, ctx.sampleRate * 0.25, ctx.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 3;
+    src.buffer = b; f.type = "lowpass"; f.frequency.value = 500; g.gain.value = 0.5 * s;
+    src.connect(f).connect(g).connect(master); src.start();
+  }
+  function updateMuteUi() {
+    const b = $("mute");
+    b.setAttribute("aria-pressed", String(muted));
+    b.textContent = muted || !ctx ? "🔇" : "🔊";
+    b.title = muted ? "Unmute (M)" : ctx ? "Mute (M)" : "Sound starts on first interaction (M to mute)";
+  }
+  function toggleMute() {
+    muted = !muted;
+    try { localStorage.setItem("otrv.muted", muted ? "1" : "0"); } catch {}
+    if (!ctx) init();
+    if (ctx) set(master.gain, muted ? 0 : 0.9, 0.03);
+    updateMuteUi();
+  }
+  const first = () => { init(); ctx?.resume?.(); };
+  for (const ev of ["pointerdown", "keydown"]) addEventListener(ev, first, { once: false, passive: true });
+  updateMuteUi();
+  return { horn, update, impact, toggleMute, get ready() { return !!ctx; } };
+})();
+$("mute").onclick = () => sound.toggleMute();
 window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek }; // debug handle (tests)
 function loop(now) {
   const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
@@ -1016,6 +1611,15 @@ function loop(now) {
     else v.playbackRate = rate * (1 + Math.max(-0.25, Math.min(0.25, d)));
   }
 
+  if (mode === "drive" && ready) {
+    driveFrame(rdt);
+    car.visible = carVisibleFrom(camera);
+    ribbon.visible = false;
+    updateKeyLight();
+    renderer.render(scene, camera);
+    return;
+  }
+  readInput(rdt); // gamepad buttons (Start / Y / Back) and the horn also work during replay
   const ps = poseAt(clock);
   placeCar(ps, clock);
   updateRibbon(clock);
@@ -1024,6 +1628,8 @@ function loop(now) {
   ribbon.visible = ready;
   updateKeyLight();
   hud(clock);
+  const s = telAt(clock);
+  sound.update({ speed: s ? s.mph / 2.23694 : 0, playing, reverse: s?.gear === "R" });
   renderer.render(scene, camera);
 }
 

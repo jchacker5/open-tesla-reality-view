@@ -9,6 +9,7 @@ otrv egomask                               optional, once: mask your car's body 
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
 otrv view drive1                           open the replay viewer
+otrv studio                                the same steps as a local web app (needs `uv sync --extra studio`)
 """
 
 from __future__ import annotations
@@ -168,6 +169,15 @@ def build_parser() -> argparse.ArgumentParser:
     a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
     a.add_argument("name", help="run name")
     a.add_argument("--port", type=int, default=8765, help="local port")
+
+    a = cmd(
+        "studio",
+        "local web app: pick footage, see drives, choose a window, build and open cities "
+        "(needs `uv sync --extra studio`; 127.0.0.1 only)",
+        data=True,
+    )
+    a.add_argument("--port", type=int, default=8770, help="local port (the next free one is used if taken)")
+    a.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
     return ap
 
 
@@ -293,6 +303,14 @@ def cmd_view(args) -> None:
         srv.serve_forever()
 
 
+def cmd_studio(args) -> None:
+    try:
+        from .studio import server
+    except ImportError as e:
+        raise SystemExit(f"otrv studio needs its extra ({e.name} is missing): run `uv sync --extra studio`") from e
+    server.serve(args.data, args.port, open_browser=not args.no_browser, work=str(WORK))
+
+
 def cmd_setup_brush(args) -> None:
     exe = brush.setup(Path(args.dir).expanduser())
     print(f"Brush installed: {exe}")
@@ -333,6 +351,8 @@ def dispatch(args) -> None:
         recon.export_nvs(WORK / args.name, args.fps)
     elif c == "view":
         cmd_view(args)
+    elif c == "studio":
+        cmd_studio(args)
 
 
 def _cmd_str(cmd) -> str:

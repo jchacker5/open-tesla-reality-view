@@ -13,14 +13,66 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.12" }
     runs-on: ${{ matrix.os }}
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  # End to end on synthetic footage: real ffmpeg, rsync and SEI parsing; COLMAP/Brush are skipped.
+  integration:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --group dev
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pytest -q
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: uv sync --locked
+      - name: Paths (footage via OTRV_DATA, the global data-dir setting)
+        run: |
+          echo "USB=$RUNNER_TEMP/usb/TeslaCam" >> "$GITHUB_ENV"
+          echo "OTRV_DATA=$RUNNER_TEMP/teslacam" >> "$GITHUB_ENV"
+      - name: Generate a 4-camera TeslaCam clip (testsrc2) plus a Sentry clip
+        run: |
+          mkdir -p "$USB/RecentClips" "$USB/SentryClips/2026-01-01_00-00-00"
+          for cam in front back left_repeater right_repeater; do
+            ffmpeg -loglevel error -f lavfi -i testsrc2=size=640x480:rate=30 -t 8 -pix_fmt yuv420p \
+              "$USB/RecentClips/2026-01-02_03-04-05-$cam.mp4"
+          done
+          cp "$USB/RecentClips/2026-01-02_03-04-05-front.mp4" \
+            "$USB/SentryClips/2026-01-01_00-00-00/2026-01-01_00-00-00-front.mp4"
+      - name: otrv ingest && otrv list && otrv prep
+        run: |
+          uv run otrv ingest --src "$USB" && uv run otrv list && \
+            uv run otrv prep 2026-01-02_03-04-05 --name ci --start 1 --dur 4 --fps 2
+      - name: Check prep outputs
+        run: |
+          test ! -e "$OTRV_DATA/SentryClips"   # Sentry is opt-in
+          for cam in front back left_repeater right_repeater; do
+            test "$(ls work/ci/images/$cam | wc -l)" -eq 8
+            test "$(ls work/ci/masks/$cam | wc -l)" -eq 8
+            test -s "work/ci/viewer/cams/$cam.mp4"
+          done
+          test -s work/ci/pairs.txt && test -s work/ci/rig_config.json && test -f work/ci/viewer/telemetry.json
+          python3 -c "import json; m = json.load(open('work/ci/meta.json')); assert m['dur'] == 4.0 and len(m['cams']) == 4, m"
+      - name: Re-prep a shorter window leaves no stale frames
+        run: |
+          uv run otrv prep 2026-01-02_03-04-05 --name ci --start 0 --dur 2 --fps 2
+          test "$(ls work/ci/images/front | wc -l)" -eq 4
+      - name: Friendly failures
+        run: |
+          if uv run otrv prep 2026-01-02_03-04-05 --name bad --start 7 --dur 5 2>err.txt; then exit 1; fi
+          grep -q "runs past the end" err.txt
+          if uv run otrv view ci 2>err.txt; then exit 1; fi
+          grep -q "run \`otrv recon ci\` first" err.txt

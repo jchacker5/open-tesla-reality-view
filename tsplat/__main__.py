@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import importlib.util
 import json
 import os
 import subprocess
@@ -24,7 +25,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, doctor, ingest, prep, recon, serve, sky, speed
+from . import bench, brush, densify, doctor, ingest, prep, recon, serve, sky, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -176,6 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="alpha: sky transparent in training (ignored in images that also need an ego/mover mask); "
         "ignore: sky masked out; off: trained like the rest",
     )
+    a.add_argument(
+        "--dense-init",
+        action="store_true",
+        help="seed Brush with Depth Anything V2 depth fitted to the SfM points, plus a road ribbon "
+        "(needs `uv sync --extra quality`; ~0.1 s per image on an M4)",
+    )
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -270,6 +277,8 @@ def cmd_recon(args) -> None:
     if args.skip_sfm and not (work / "dense" / "sparse" / "images.txt").exists():
         raise SystemExit(f"--skip-sfm needs an earlier recon's {work / 'dense'}: run `otrv recon {args.name}` first")
     doctor.preflight("recon", skip=("colmap",) if args.skip_sfm else ())
+    if args.dense_init and importlib.util.find_spec("transformers") is None:  # fail before SfM, not after
+        raise SystemExit("--dense-init needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
     (work / "recon_args.json").unlink(missing_ok=True)  # written only when this run finishes
     dense = work / "dense"
     timings_path = work / "timings.json"
@@ -285,9 +294,11 @@ def cmd_recon(args) -> None:
     else:
         dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
-    t0 = time.perf_counter()
-    sky.apply(dense, args.sky)
-    timings["levers"] = time.perf_counter() - t0
+    if args.dense_init:
+        t0 = time.perf_counter()
+        densify.run(work, dense)
+        timings["dense_init"] = time.perf_counter() - t0
+    sky.apply(dense, args.sky)  # last: it can turn images into RGBA .png and rename them
     t0 = time.perf_counter()
     recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, ["--seed", str(args.seed)], args.prune)
     timings["train"] = time.perf_counter() - t0
@@ -302,6 +313,7 @@ def cmd_recon(args) -> None:
                 "seed": args.seed,
                 "prune": args.prune,
                 "sky": args.sky,
+                "dense_init": args.dense_init,
             }
         )
     )

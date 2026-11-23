@@ -63,9 +63,9 @@
   .mapAttr { position: absolute; right: 18px; bottom: 76px; max-width: 220px; text-align: right; font: 9px/1.3 var(--mono); color: var(--dim);
     opacity: .8; pointer-events: none; z-index: 2; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
   button.rec { border-color: #ff3b5c; color: #ff3b5c; }
+  /* edge of the reconstruction: fog in the scene's background colour closing in from the sides */
   .edge { position: absolute; inset: 0; pointer-events: none; z-index: 1;
-    background: repeating-linear-gradient(45deg, rgba(245,165,36,.28) 0 10px, transparent 10px 22px);
-    -webkit-mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); }
+    background: radial-gradient(120% 110% at 50% 58%, rgba(11,13,16,0) 38%, rgba(11,13,16,.78) 72%, rgba(11,13,16,.96) 100%); }
   .edge span { position: absolute; left: 50%; top: 56px; transform: translateX(-50%); font: 11px var(--mono); color: var(--warn);
     background: rgba(16,18,22,.85); border: 1px solid rgba(245,165,36,.5); padding: 3px 8px; border-radius: 4px; letter-spacing: .06em; }
   .tDrive { position: absolute; left: 0; right: 0; bottom: 96px; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 18px; z-index: 3; pointer-events: none; }
@@ -185,7 +185,7 @@
           <div class="chips"><span class="chip" id="padChip" hidden>🎮 controller connected</span></div>
         </div>
         <div class="toast" id="toast" role="status" hidden></div>
-        <div class="edge" id="edge" hidden><span>edge of the reconstruction</span></div>
+        <div class="edge" id="edge" hidden></div>
         <canvas class="minimap" id="minimap" width="300" height="300" hidden role="img" aria-label="Minimap: heading-up map around the car"></canvas>
         <div class="mapAttr" id="mapAttr" hidden></div>
         <div class="tDrive" id="tDrive" hidden>
@@ -1099,7 +1099,32 @@ function groundH(x, z, hint) {
 const wallDistM = (x, z) => COLL.dToM(bilinear(COLL.wallDist, COLL.wnx, COLL.wnz, COLL.wx0, COLL.wz0, COLL.wallCell, ...COLL.grid(x, z)));
 
 const DRV = { L: CAR.wheelZ * 2, mass: 1900, force: 14000, vmax: 50, brake: 12, revMax: 12, track: 1.6, hz: 120,
-  soft: 9, hard: 11, respawn: 3 };
+  soft: 6, hard: 8, respawn: 3 }; // soft / hard corridor half-widths (m): defaults, re-estimated from the splat below
+// Fallback corridor (no collision.json): how far the reconstruction actually reaches either side of the
+// recorded road. Sample up to ~25k splats (time-capped), keep opaque ones near road height, measure
+// their distance from the path; the 85th percentile, minus a margin, becomes the soft edge (4-10 m).
+let corridorEstimated = false;
+function estimateCorridor() {
+  if (corridorEstimated || !ready) return;
+  corridorEstimated = true;
+  const n = splat.numSplats ?? 0;
+  if (!n) return;
+  const step = Math.max(1, Math.floor(n / 25000)), t0 = performance.now(), ds = [], STOP = {};
+  try {
+    splat.forEachSplat((i, c, _s, _q, opacity) => {
+      if (i % step) return;
+      if (performance.now() - t0 > 400) throw STOP;
+      if (opacity < 0.25) return;
+      const g = toGround(c), q = pathQuery(g.x, g.z);
+      if (!q || q.i === 0 || q.i === GP.length - 2) return; // beyond the ends of the path
+      if (Math.abs((g.h - q.h) / M) < 0.8) ds.push(q.d);
+    });
+  } catch (e) { if (e !== STOP) { console.warn("corridor estimate failed:", e); return; } }
+  if (ds.length < 200) return;
+  ds.sort((a, b) => a - b);
+  DRV.soft = clamp(ds[Math.floor(ds.length * 0.85)] - 0.5, 4, 10);
+  DRV.hard = DRV.soft + 2;
+}
 const drive = { x: 0, z: 0, psi: 0, vx: 0, vz: 0, r: 0, delta: 0, yAbs: 0, yv: 0, spin: 0, aLong: 0, aLat: 0,
   slip: 0, brakeLit: false, gear: "D", out: 0, hint: 0, steps: 0, acc: 0, prev: null, shake: 0, lookBehind: false, stopT: 0, bounds: true, u: 0,
   cam: "chase", headlights: false, input: { throttle: 0, brake: 0, steer: 0, handbrake: false, boost: false } };
@@ -1114,6 +1139,7 @@ function driveReset(t = clock, speed = null) {
 }
 const snapDrive = () => ({ x: drive.x, z: drive.z, psi: drive.psi, yAbs: drive.yAbs, pitch: drive.pitch ?? 0, roll: drive.roll ?? 0 });
 function onImpact(speed) {
+  drive.impacts = (drive.impacts ?? 0) + 1;
   drive.shake = REDUCED_MOTION ? 0 : Math.min(1, speed / 8);
   rumble(Math.min(1, speed / 10), 160);
   sound.impact?.(Math.min(1, speed / 10));
@@ -1131,7 +1157,8 @@ function driveStep(h, inp) {
   let a = 0;
   const thr = clamp(inp.throttle, 0, 1), brk = clamp(inp.brake, 0, 1);
   if (u < -0.5 && thr > 0) a += DRV.brake * thr;                        // throttle while rolling back = brake
-  else a += (DRV.force * (inp.boost ? 1.3 : 1) * thr * Math.max(0, 1 - u / DRV.vmax)) / DRV.mass;
+  // (drive power fades while pointed out over the edge of the reconstruction: the car coasts to a stop)
+  else a += (DRV.force * (inp.boost ? 1.3 : 1) * thr * (1 - 0.9 * (drive.edgeOut ?? 0)) * Math.max(0, 1 - u / DRV.vmax)) / DRV.mass;
   if (!(brk > 0 && u <= 0.5)) drive.stopT = 0;
   if (brk > 0) {
     if (u > 0.5) a -= DRV.brake * brk;
@@ -1177,17 +1204,25 @@ function driveStep(h, inp) {
       const vn = drive.vx * nx + drive.vz * nz;
       if (vn < 0) { drive.vx -= nx * vn * 1.3; drive.vz -= nz * vn * 1.3; onImpact(-vn); }
     }
-  } else if (q.d > DRV.soft && drive.bounds) {
-    const nx = (drive.x - q.px) / q.d, nz = (drive.z - q.pz) / q.d, over = q.d - DRV.soft;
-    const push = 1.6 * over * over;                                      // soft wall, force ~ overshoot^2
-    drive.vx -= nx * push * h; drive.vz -= nz * push * h;
-    if (q.d > DRV.hard) {                                                // hard wall
+  } else if (q.d > DRV.soft - 2 && q.d > 1e-6) {
+    // approaching the edge of the splat: bleed off outward speed (and some speed overall) so the car
+    // coasts to a stop at the edge instead of slamming into an invisible wall
+    const nx = (drive.x - q.px) / q.d, nz = (drive.z - q.pz) / q.d;
+    const e = clamp((q.d - (DRV.soft - 2)) / (DRV.hard - DRV.soft + 2), 0, 1), e2 = e * e;
+    const vn = drive.vx * nx + drive.vz * nz;
+    if (vn > 0) { const k = vn * (1 - Math.exp(-10 * e2 * h)); drive.vx -= nx * k; drive.vz -= nz * k; }
+    const drag = Math.exp(-1.4 * e2 * h);
+    drive.vx *= drag; drive.vz *= drag;
+    drive.edgeOut = e2 * Math.max(0, Math.sin(drive.psi) * nx + Math.cos(drive.psi) * nz);
+    if (q.d > DRV.soft) { const over = q.d - DRV.soft, push = 1.6 * over * over; drive.vx -= nx * push * h; drive.vz -= nz * push * h; } // soft wall ~ overshoot^2
+    if (q.d > DRV.hard) {                                                // hard wall: last resort
       drive.x = q.px + nx * DRV.hard; drive.z = q.pz + nz * DRV.hard;
-      const vn = drive.vx * nx + drive.vz * nz;
-      if (vn > 0) { drive.vx -= nx * vn * 1.3; drive.vz -= nz * vn * 1.3; onImpact(vn); }
+      const vh = drive.vx * nx + drive.vz * nz;
+      if (vh > 2) { drive.vx -= nx * vh * 1.3; drive.vz -= nz * vh * 1.3; onImpact(vh); } // a real hit bounces
+      else if (vh > 0) { drive.vx -= nx * vh; drive.vz -= nz * vh; }                     // a nudge just stops
     }
-  }
-  if (!COLL?.wallDist) drive.edge = clamp((q.d - (DRV.soft - 3)) / 3, 0, 1);
+  } else drive.edgeOut = 0;
+  if (!COLL?.wallDist) drive.edge = clamp((q.d - (DRV.soft - 2.5)) / (DRV.hard - DRV.soft + 2.5), 0, 1);
   drive.out = drive.bounds && !COLL?.wallDist && q.d > DRV.soft ? drive.out + h : 0;
   if (drive.out > DRV.respawn) {                                          // auto-respawn on the path
     drive.x = q.px; drive.z = q.pz; drive.psi = Math.atan2(q.tx, q.tz); drive.vx = drive.vz = drive.r = 0; drive.out = 0;
@@ -1224,10 +1259,10 @@ function driveAdvance(dt, inp) {
 window.otrvDrive = {
   get state() {
     return { x: drive.x, z: drive.z, heading: drive.psi, speed: drive.u ?? 0, steer: drive.delta, gear: drive.gear, yawRate: drive.r,
-      slip: drive.slip, distFromPath: drive.d ?? 0, respawns: drive.respawns ?? 0, pos: fromGround(drive.x, drive.z, drive.yAbs * M).toArray(), collision: !!COLL };
+      slip: drive.slip, distFromPath: drive.d ?? 0, respawns: drive.respawns ?? 0, impacts: drive.impacts ?? 0, corridor: { soft: DRV.soft, hard: DRV.hard }, pos: fromGround(drive.x, drive.z, drive.yAbs * M).toArray(), collision: !!COLL };
   },
   loadCollision: () => loadCollision(),
-  reset: (t, speed) => driveReset(t ?? clock, speed),
+  reset: (t, speed) => { estimateCorridor(); driveReset(t ?? clock, speed); },
   set bounds(on) { drive.bounds = !!on; },
   step(dt, input = {}) {
     if (!drive.prev) driveReset();
@@ -1364,6 +1399,7 @@ function drivePose(out, carPos, fwd, dt) {
 function driveEnter() {
   setPlaying(false);
   loadCollision();
+  estimateCorridor();
   driveReset(clock);
   driveCamS.ready = false;
   drive.cam = "chase";
@@ -1595,7 +1631,7 @@ function driveFrame(rdt) {
   renderHud({ mph: Math.abs(drive.u ?? 0) * 2.23694, gear: drive.gear, steer: THREE.MathUtils.radToDeg(drive.delta) * 15, ap: null,
     brake: drive.brakeLit, blinkL: false, blinkR: false }, clock);
   setHidden("edge", (drive.edge ?? 0) < 0.05);
-  if ((drive.edge ?? 0) >= 0.05) $("edge").style.opacity = String(0.35 + 0.65 * drive.edge);
+  if ((drive.edge ?? 0) >= 0.05) $("edge").style.opacity = String(Math.min(1, drive.edge * 1.15));
   if ((drive.d ?? 0) > DRV.soft && !COLL?.wallDist) { if (!edgeToastShown) { toast("Leaving the reconstructed area", 2400); edgeToastShown = true; } }
   else edgeToastShown = false;
   if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(drive.x, drive.z, drive.psi, true); // ~20 Hz is plenty

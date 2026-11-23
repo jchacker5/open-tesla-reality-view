@@ -35,7 +35,7 @@ GATES = {
     "max_reproj_px": 1.5,
 }
 # prep settings (meta.json) copied into each ledger line's config, next to recon_args.json
-PREP_CONFIG = ("clip", "start", "dur", "fps", "width", "sky_model")
+PREP_CONFIG = ("clip", "start", "dur", "fps", "width", "sky_model", "mask_movers")
 
 
 def _image_names(dense: Path) -> list[str]:
@@ -340,7 +340,7 @@ def card(m: dict) -> str:
         else None
     )
     lines = [
-        f"### {m['name']}  ({env.get('chip', '?')}, {env.get('ram_gb', '?')} GB)",
+        f"### {m['name']}  ({env.get('chip', '?')}, {env.get('ram_gb', '?')} GB, {env.get('brush', 'brush ?')})",
         f"- registration: {reg or 'n/a'}",
         f"- sparse: {sp.get('reproj_px')} px reprojection, {int(sp.get('points') or 0)} points",
         psnr_line,

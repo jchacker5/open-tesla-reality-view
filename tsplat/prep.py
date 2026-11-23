@@ -467,6 +467,7 @@ def run(
                 "cams": list(cams),
                 "width": width,
                 "sky_model": sky_model,
+                "mask_movers": movers,
             },
             indent=1,
         )

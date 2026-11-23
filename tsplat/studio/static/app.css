@@ -262,6 +262,8 @@ details.adv[open] summary svg { transform: rotate(90deg); }
 .step .n svg { width: 14px; height: 14px; }
 .step .lbl { font-weight: 600; font-size: 13px; color: var(--dim); }
 .step .t { font: 11px var(--mono); color: var(--faint); margin-top: 3px; min-height: 15px; font-variant-numeric: tabular-nums; }
+.step .subs { font-size: 11px; color: var(--faint); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step .subs:empty { display: none; }
 .step .progress { margin-top: 10px; }
 .step.done .n { background: rgba(62, 207, 142, .12); border-color: var(--ok); color: var(--ok); }
 .step.done .lbl { color: var(--text); }

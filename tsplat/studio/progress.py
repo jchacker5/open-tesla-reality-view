@@ -49,6 +49,32 @@ STAGE_START: list[tuple[re.Pattern, str]] = [
 ]
 
 
+# Optional steps of pipeline v2 (feat/pipeline-v2), recognised by the line each prints when it finishes.
+# They run inside a stage above, so they are reported as {"type": "substage"} events of that parent stage
+# rather than as stages of their own: a build without them looks the same, the stage markers and ETAs
+# don't change, and the UI shows a substage it doesn't know by its label (or name) next to the parent.
+SUBSTAGES: list[tuple[re.Pattern, str, str, str]] = [  # (line, name, label, parent stage)
+    (re.compile(r"^sky \("), "sky", "Sky masks", "masks"),
+    (re.compile(r"^color norm\b"), "color", "Colour match", "undistort"),
+    (re.compile(r"^dense init:"), "depth", "Depth init", "undistort"),
+    (re.compile(r"^clean: \d+ -> \d+ splats"), "clean", "Prune & clean", "export"),
+    (re.compile(r"^collision: "), "collision", "Collision", "export"),
+]
+LABELS.update({name: label for _, name, label, _ in SUBSTAGES})
+
+
+def match_substage(line: str) -> dict | None:
+    for rx, name, label, parent in SUBSTAGES:
+        if rx.search(line):
+            return {"type": "substage", "stage": parent, "substage": name, "label": label}
+    return None
+
+
+def label(name: str) -> str:
+    """A stage or substage's label; an unknown name is shown as itself."""
+    return LABELS.get(name, name)
+
+
 def strip_ansi(text: str) -> str:
     return ANSI.sub("", text)
 
@@ -200,6 +226,9 @@ class Tracker:
         stage = match_stage(line)
         if stage:
             events += self.begin(stage)
+        sub = match_substage(line)
+        if sub:
+            return events + [sub]
         hit = match_progress(line)
         if not hit:
             return events

@@ -175,3 +175,44 @@ def test_history_rates(tmp_path):
     assert "frames" not in rates
     est = progress.estimate_build(rates, 240, 15000)
     assert est["frames"] == pytest.approx(progress.DEFAULT_RATES["frames"] * 240)
+
+
+# Lines pipeline v2 (feat/pipeline-v2) prints when its optional steps finish.
+V2_LOG = [
+    ("[x] 6 cams, 0s +20s @ 6 fps", None),
+    ("ego mask: guessed", None),
+    ("sky (segformer): front 31%, back 28%", ("sky", "masks")),
+    ("$ colmap feature_extractor ...", None),
+    ("$ colmap image_undistorter ...", None),
+    ("color norm (LAB, to front): back dL +2.1, left_repeater dL -0.4", ("color", "undistort")),
+    (
+        "dense init: +120000 depth points (from 3000000), +8000 road-ribbon points (SfM had 40000)",
+        ("depth", "undistort"),
+    ),
+    ("$ /x/brush_app dense", None),
+    ("clean: 900000 -> 850000 splats (prune 40000, haze 10000)", ("clean", "export")),
+    ("splat -> work/x/viewer/scene.ply (120 MB)", None),
+    (
+        "collision: ground 80x200 cells of 0.5 m (90% from splats, the rest from the path), 12 wall cells",
+        ("collision", "export"),
+    ),
+]
+
+
+def test_pipeline_v2_substages():
+    t = Tracker(n_images=8)
+    subs = []
+    for line, want in V2_LOG:
+        evs = t.feed(line)
+        got = [(e["substage"], e["stage"]) for e in evs if e["type"] == "substage"]
+        assert got == ([want] if want else []), line
+        subs += [e for e in evs if e["type"] == "substage"]
+    assert [e["label"] for e in subs] == ["Sky masks", "Colour match", "Depth init", "Prune & clean", "Collision"]
+    assert t.stage == "export"  # substages never move the core stages
+    assert set(progress.STAGES) == {"frames", "masks", "features", "match", "map", "undistort", "train", "export"}
+
+
+def test_unknown_stage_names_are_tolerated():
+    t = Tracker(n_images=8)
+    assert t.begin("relight") == [] and t.progress("relight", 1, 2) == []
+    assert progress.label("relight") == "relight" and progress.label("depth") == "Depth init"

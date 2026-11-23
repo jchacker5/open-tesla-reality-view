@@ -533,6 +533,8 @@ class _Ctx:
                     self._last_progress = now
                     job.eta = progress.eta_total(self.tracker, self.r.rates, self.n_images, self.steps)
                     self.log.emit({**ev, "eta": job.eta})
+            else:  # e.g. "substage" (pipeline v2's optional steps): passed through to the UI as-is
+                self.log.emit(ev)
 
     def line(self, text: str) -> None:
         self._raw.write(text + "\n")

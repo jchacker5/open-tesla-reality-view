@@ -722,7 +722,7 @@ async function pageBuild(view, name) {
       queue.append(h("a", { href: `#/build/${encodeURIComponent(j.name)}`, class: j.name === name ? "on" : "" },
         h("div", { class: "qn", text: j.name }),
         h("div", { class: "qs" }, h("span", { class: `state ${j.state}`, text: j.state }),
-          h("span", { text: j.state === "running" ? `${STAGE_LABEL[j.stage] || ""} · ${human(j.eta)} left` : j.finished ? timeFmt.format(new Date(j.finished * 1000)) : "" })),
+          h("span", { text: j.state === "running" ? `${STAGE_LABEL[j.stage] || j.stage || ""} · ${human(j.eta)} left` : j.finished ? timeFmt.format(new Date(j.finished * 1000)) : "" })),
         j.state === "running" || j.state === "queued" ? h("div", { class: "progress" }, h("i", { style: { width: `${pct}%` } })) : null));
     }
   };
@@ -765,8 +765,9 @@ async function drawJob(name, box) {
     const n = h("div", { class: "n", text: i + 1 });
     const t = h("div", { class: "t" });
     const bar = h("i", { style: { width: "0%" } });
-    const el = h("div", { class: "step", title: STAGE_HINT[st] }, n, h("div", { class: "lbl", text: STAGE_LABEL[st] }), t, h("div", { class: "progress" }, bar));
-    return [st, { el, n, t, bar, secs: null }];
+    const sub = h("div", { class: "subs" });  // pipeline v2 optional steps seen in this stage (substage events)
+    const el = h("div", { class: "step", title: STAGE_HINT[st] }, n, h("div", { class: "lbl", text: STAGE_LABEL[st] }), t, sub, h("div", { class: "progress" }, bar));
+    return [st, { el, n, t, bar, sub, subs: [], secs: null }];
   }));
   const errBox = h("div", { class: "error-box", hidden: true });
   const doneBox = h("div", { class: "done-box", hidden: true });
@@ -801,7 +802,7 @@ async function drawJob(name, box) {
     stateTag.textContent = job.state;
     const pct = job.state === "done" ? 100 : overallPct(job);
     overallBar.style.width = `${pct}%`;
-    overallTxt.textContent = `${pct}% · ${job.state === "running" ? STAGE_HINT[job.stage] || "starting" : job.state}`;
+    overallTxt.textContent = `${pct}% · ${job.state === "running" ? STAGE_HINT[job.stage] || job.stage || "starting" : job.state}`;
     const el = job.started ? ((job.finished || Date.now() / 1000) - job.started) : 0;
     elapsedTxt.textContent = job.started ? `elapsed ${clock(el)}` : "";
     if (job.state === "running" || job.state === "queued") {
@@ -881,7 +882,7 @@ async function drawJob(name, box) {
         if (ev.status === "done") {
           job.frac[ev.stage] = 1;
           job.stages_done = [...new Set([...(job.stages_done || []), ev.stage])];
-          steps[ev.stage].secs = ev.seconds;
+          if (steps[ev.stage]) steps[ev.stage].secs = ev.seconds;  // unknown stage names are tolerated
         } else {
           job.frac[ev.stage] = job.frac[ev.stage] && job.frac[ev.stage] < 1 ? job.frac[ev.stage] : 0;
           job.stage_eta = null;
@@ -892,6 +893,11 @@ async function drawJob(name, box) {
         job.frac = { ...(job.frac || {}), [ev.stage]: ev.frac };
         job.stage_eta = ev.stage_eta;
         job.eta = ev.eta;
+      } else if (ev.type === "substage") {
+        const x = steps[ev.stage] || steps[job.stage];
+        const lbl = ev.label || ev.substage;
+        if (!x) addLog(`(${lbl})`);
+        else if (!x.subs.includes(lbl)) { x.subs.push(lbl); x.sub.textContent = x.subs.join(" · "); }
       } else if (ev.type === "eta") {
         job.eta = ev.eta;
       }

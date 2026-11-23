@@ -75,6 +75,11 @@ Stage starts come from the lines `otrv` prints (`[name] N cams`, `ego mask:`, `$
 `$ …brush…`, `splat -> `). Frames and masks print no progress, so the runner counts the files written
 so far.
 
+Pipeline v2's optional steps (sky masks, colour match, depth init, prune/clean, collision) are recognised
+by the line each prints when it finishes and reported as `substage` events of the stage they run in
+(`progress.SUBSTAGES`); the stepper lists them under that stage. Stage or substage names the studio
+doesn't know are shown as-is (or just logged), never an error.
+
 Files in `work/<name>/`:
 
 | File | Contents |

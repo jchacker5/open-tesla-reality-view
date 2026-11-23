@@ -227,6 +227,24 @@ def test_running_job_becomes_interrupted_after_restart(tmp_path):
     assert json.loads((d / "job.json").read_text())["state"] == "interrupted"
 
 
+def test_pipeline_v2_substages_reach_the_event_log(tmp_path):
+    script = tmp_path / "v2.py"
+    script.write_text(
+        "print('[t] 6 cams, 0s +2s @ 6 fps')\nprint('ego mask: guessed')\nprint('sky (segformer): front 30%')\n"
+        "print('relight: something pipeline v3 does')\n",
+    )
+    r = make_runner(tmp_path, lambda job: [Phase("prep", [sys.executable, str(script)], ("frames", "masks"))])
+    try:
+        r.submit("v2", {})
+        assert wait(r, "v2").state == "done"
+        evs = read_events(r.events_path("v2"))
+        subs = [e for e in evs if e["type"] == "substage"]
+        assert [(e["stage"], e["substage"], e["label"]) for e in subs] == [("masks", "sky", "Sky masks")]
+        assert any(e["type"] == "log" and e["line"].startswith("relight:") for e in evs)  # unknown: just logged
+    finally:
+        r.stop()
+
+
 @pytest.mark.parametrize("name", ["", "../x", "a/b", ".hidden", "x" * 81, "a..b"])
 def test_rejects_bad_names(tmp_path, name):
     r = Runner(tmp_path / "work", plan=lambda job: [])

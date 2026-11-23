@@ -73,15 +73,12 @@ def test_floaters_counts_only_opaque_splats_in_the_tube():
     assert splats.floaters(ply, ego) == 5
 
 
-def test_prune_drops_tube_and_giant_faint_splats():
-    ego = splats.EgoPath.from_dict(path_dict(mpu=2.0))
-    pts = [[0, -0.5, 3], [10, -2, 3], [10, -2, 4], [10, -2, 5]]
-    # metres: 1 m up in the tube; a 4 m faint splat; a 4 m opaque splat (kept); a 1 m faint one (kept)
-    ply = make_ply(pts, opacity=[0.9, 0.1, 0.9, 0.1], scale_m=[0.1, 4.0, 4.0, 1.0], mpu=2.0)
-    kept, counts = splats.prune(ply, ego)
-    assert counts == {"before": 4, "tube": 1, "giant": 1, "after": 2}
-    assert kept.xyz()[:, 2].tolist() == [4, 5]
-    assert kept.data.dtype.names == ply.data.dtype.names
+def test_scales_and_colour_helpers():
+    ply = make_ply([[0, 0, 0]], scale_m=2.0, mpu=1.0)
+    ply.data["scale_1"] = np.log(0.1)
+    assert ply.max_scale()[0] == pytest.approx(2.0) and ply.min_scale()[0] == pytest.approx(0.1)
+    ply.data["f_dc_0"] = 0
+    assert ply.rgb()[0, 0] == pytest.approx(0.5)
 
 
 def test_horizontal_basis_is_orthonormal_and_follows_the_path():

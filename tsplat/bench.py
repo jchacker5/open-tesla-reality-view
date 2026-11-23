@@ -8,7 +8,9 @@ Metrics (all from files a `recon` run leaves behind):
   lpips          masked LPIPS (AlexNet) of the same views (needs `uv sync --extra quality`, else skipped)
   road           PSNR and LPIPS on the bottom 35% of each held-out view, inside the mask
   floaters       splats with opacity > 0.1 inside the ego swept tube (1 m either side of the path,
-                 0.15-1.6 m above the road), in viewer/scene.ply and in the trained splat before pruning
+                 0.15-1.6 m above the road), in viewer/scene.ply and in the trained splat before clean-up
+  haze           share of the total opacity in translucent splats (opacity < 0.35), before/after
+                 clean-up, plus the splats each clean-up rule removed (clean.json)
   timings        seconds per stage, from timings.json
 Every run is appended to work/ledger.jsonl, including failures, and gated (see GATES). A metric that
 can't be computed (e.g. SfM failed, so there is no dense/) is recorded under "errors" and fails the gate.
@@ -223,18 +225,27 @@ def psnr(work: Path, recon_args: dict) -> dict | None:
 def floater_stats(work: Path, recon_args: dict) -> dict | None:
     """Splats inside the ego swept tube (splats.floaters) in the scene the viewer shows and, when it
     exists, in the trained splat before pruning. None when recon didn't get as far as a scene."""
-    from . import splats
+    from . import clean, splats
 
     scene_ply, path_json = work / "viewer" / "scene.ply", work / "viewer" / "path.json"
     if not (scene_ply.exists() and path_json.exists()):
         return None
     ego = splats.EgoPath.load(path_json)
     scene = splats.read_ply(scene_ply)
-    out = {"scene": splats.floaters(scene, ego), "splats": len(scene)}
+    out = {
+        "scene": splats.floaters(scene, ego),
+        "splats": len(scene),
+        "translucent_mass": round(clean.translucent_mass(scene), 4),
+    }
     raw = work / "splat" / f"splat_{recon_args.get('steps')}.ply"
+    raw = raw if raw.exists() else work / "viewer" / "scene_raw.ply"
     if raw.exists():
         rp = splats.read_ply(raw)
-        out |= {"raw": splats.floaters(rp, ego), "splats_raw": len(rp)}
+        out |= {
+            "raw": splats.floaters(rp, ego),
+            "splats_raw": len(rp),
+            "translucent_mass_raw": round(clean.translucent_mass(rp), 4),
+        }
     return out
 
 
@@ -310,14 +321,22 @@ def card(m: dict) -> str:
         psnr_line, lpips_line, road_line = "- held-out PSNR: n/a (run `otrv recon --eval`)", None, None
     floater_line = (
         f"- floaters in ego tube: {fl['scene']} of {fl['splats']} splats"
-        + (f" ({fl['raw']} of {fl['splats_raw']} before prune)" if "raw" in fl else "")
+        + (f" ({fl['raw']} of {fl['splats_raw']} before clean-up)" if "raw" in fl else "")
         if fl
         else "- floaters in ego tube: n/a"
     )
-    pr = m.get("prune") or {}
-    prune_line = (
-        f"- prune: {pr['before']} -> {pr['after']} splats ({pr['tube']} in ego tube, {pr['giant']} giant & faint)"
-        if pr
+    haze_line = (
+        f"- haze: {fl['translucent_mass']:.1%} of opacity mass in translucent splats (opacity < 0.35)"
+        + (f", {fl['translucent_mass_raw']:.1%} before clean-up" if "translucent_mass_raw" in fl else "")
+        if fl and "translucent_mass" in fl
+        else None
+    )
+    cl = m.get("clean") or {}
+    clean_line = (
+        f"- clean: {cl['before']} -> {cl['after']} splats ("
+        + (", ".join(f"{k} {v}" for k, v in cl.get("removed", {}).items()) or "no rules")
+        + ")"
+        if cl
         else None
     )
     lines = [
@@ -328,7 +347,8 @@ def card(m: dict) -> str:
         lpips_line,
         road_line,
         floater_line,
-        prune_line,
+        haze_line,
+        clean_line,
         "- time: " + ", ".join(f"{k} {v:.0f}s" for k, v in t.items()) if t else "- time: n/a",
         f"- config: {json.dumps(m.get('config', {}))}",
         f"- gates: {'PASS' if not m['gate_failures'] else 'FAIL: ' + '; '.join(m['gate_failures'])}",
@@ -362,7 +382,8 @@ def run(name: str, note: str = "", workdir: str = "work") -> dict:
     views = attempt("psnr", lambda: view_metrics(work, args, lpips_model() if args.get("eval") else None)) or {}
     m["psnr"], m["lpips"], m["road"] = views.get("psnr"), views.get("lpips"), views.get("road")
     m["floaters"] = attempt("floaters", lambda: floater_stats(work, args))
-    m["prune"] = attempt("prune", lambda: _read_json(work / "prune.json"), {})
+    cl = attempt("clean", lambda: _read_json(work / "clean.json"), {})
+    m["clean"] = {k: cl[k] for k in ("before", "after", "removed") if k in cl}
     m["timings"] = attempt("timings", lambda: _read_json(work / "timings.json"), {})
     m["env"] = attempt("env", environment, {})
     m["errors"] = errors

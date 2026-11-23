@@ -177,13 +177,18 @@ def test_floaters_card_and_seed_in_ledger(tmp_path, monkeypatch):
     (work / "splat").mkdir()
     splats.write_ply(work / "splat" / "splat_100.ply", raw)
     splats.write_ply(work / "viewer" / "scene.ply", raw.subset(np.array([False, False, True])))
-    (work / "prune.json").write_text(json.dumps({"before": 3, "tube": 2, "giant": 0, "after": 1}))
+    (work / "clean.json").write_text(json.dumps({"before": 3, "after": 1, "removed": {"tube": 2}}))
     m = bench.run("run", workdir=str(tmp_path))
-    assert m["floaters"] == {"scene": 0, "splats": 1, "raw": 2, "splats_raw": 3}
+    assert {k: m["floaters"][k] for k in ("scene", "splats", "raw", "splats_raw")} == {
+        "scene": 0,
+        "splats": 1,
+        "raw": 2,
+        "splats_raw": 3,
+    }
     assert m["config"]["seed"] == 7 and m["config"]["sky"] == "alpha" and m["config"]["fps"] == 6
     c = bench.card(m)
-    assert "floaters in ego tube: 0 of 1 splats (2 of 3 before prune)" in c
-    assert "prune: 3 -> 1 splats" in c
+    assert "floaters in ego tube: 0 of 1 splats (2 of 3 before clean-up)" in c
+    assert "clean: 3 -> 1 splats (tube 2)" in c and "haze: 0.0% of opacity mass" in c
     assert "floaters" not in m["errors"]
     logged = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
     assert logged["floaters"]["raw"] == 2 and logged["config"]["seed"] == 7

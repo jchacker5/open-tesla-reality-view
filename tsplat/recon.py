@@ -229,12 +229,12 @@ def train(
     viewer: bool,
     eval_every: int = 0,
     extra: list[str] | tuple = (),
-    prune: bool = False,
+    rules=None,
 ) -> Path:
     """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`;
-    `extra` is passed through to Brush (e.g. --seed); prune=True cleans the result (prune_scene) on
-    its way to viewer/scene.ply. splat/ is emptied first so a failed run can't leave an older run's
-    splat or eval renders behind."""
+    `extra` is passed through to Brush (e.g. --seed); `rules` (clean.Rules) prunes and dehazes the
+    result on its way to viewer/scene.ply. splat/ is emptied first so a failed run can't leave an
+    older run's splat or eval renders behind."""
     out = work / "splat"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
@@ -269,28 +269,16 @@ def train(
         )
     dest = work / "viewer" / "scene.ply"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    (work / "prune.json").unlink(missing_ok=True)
-    if prune and (work / "viewer" / "path.json").exists():
-        prune_scene(work, final, dest)
+    for stale in (work / "clean.json", work / "viewer" / "scene_raw.ply", dest):
+        stale.unlink(missing_ok=True)
+    if rules and (rules.prune or rules.dehaze) and (work / "viewer" / "path.json").exists():
+        from . import clean
+
+        clean.run(work, final, rules)
     else:
         shutil.copy2(final, dest)
     print(f"splat -> {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
     return dest
-
-
-def prune_scene(work: Path, src: Path, dest: Path) -> dict:
-    """Post-train clean-up (splats.prune): drop splats in the ego swept tube and giant faint haze,
-    write `dest` and log the counts to prune.json (read by `otrv bench`)."""
-    from . import splats
-
-    kept, counts = splats.prune(splats.read_ply(src), splats.EgoPath.load(work / "viewer" / "path.json"))
-    splats.write_ply(dest, kept)
-    (work / "prune.json").write_text(json.dumps(counts))
-    print(
-        f"prune: {counts['before']} -> {counts['after']} splats "
-        f"({counts['tube']} in the ego tube, {counts['giant']} giant & faint)"
-    )
-    return counts
 
 
 def qvec_to_R(q):

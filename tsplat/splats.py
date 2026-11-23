@@ -59,12 +59,29 @@ class Ply:
         """Opacity in [0, 1] (the file stores a logit)."""
         return 1.0 / (1.0 + np.exp(-self.data["opacity"].astype(np.float64)))
 
-    def max_scale(self) -> np.ndarray:
-        """Largest axis of each splat, in scene units (the file stores log scales)."""
+    def scales(self) -> np.ndarray:
+        """(n, k) axis lengths in scene units (the file stores log scales); k = 0 if there are none."""
         names = [n for n in ("scale_0", "scale_1", "scale_2") if n in self.data.dtype.names]
         if not names:
-            return np.zeros(len(self))
-        return np.exp(np.max(np.stack([self.data[n] for n in names], 1).astype(np.float64), 1))
+            return np.zeros((len(self), 0))
+        return np.exp(np.stack([self.data[n] for n in names], 1).astype(np.float64))
+
+    def max_scale(self) -> np.ndarray:
+        """Largest axis of each splat, in scene units."""
+        s = self.scales()
+        return s.max(1) if s.shape[1] else np.zeros(len(self))
+
+    def min_scale(self) -> np.ndarray:
+        s = self.scales()
+        return s.min(1) if s.shape[1] else np.zeros(len(self))
+
+    def rgb(self) -> np.ndarray:
+        """View-independent (SH band 0) colour in [0, 1]."""
+        names = ("f_dc_0", "f_dc_1", "f_dc_2")
+        if not all(n in self.data.dtype.names for n in names):
+            return np.full((len(self), 3), 0.5)
+        dc = np.stack([self.data[n] for n in names], 1).astype(np.float64)
+        return np.clip(0.5 + 0.28209479177387814 * dc, 0, 1)
 
     def subset(self, keep: np.ndarray) -> Ply:
         return Ply(self.data[keep], list(self.comments))
@@ -114,6 +131,7 @@ def write_ply(path: str | Path, ply: Ply) -> None:
     head = ["ply", "format binary_little_endian 1.0", *(f"comment {c}" for c in ply.comments)]
     head += [f"element vertex {len(out)}", *(f"property float {n}" for n in names), "end_header"]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).unlink(missing_ok=True)  # never write through a hard link (scene_raw.ply is one)
     with open(path, "wb") as f:
         f.write(("\n".join(head) + "\n").encode("ascii"))
         f.write(out.tobytes())
@@ -189,18 +207,3 @@ class EgoPath:
 def floaters(ply: Ply, ego: EgoPath, min_opacity: float = 0.1) -> int:
     """Splats with opacity > min_opacity inside the ego swept tube."""
     return int((ego.tube_mask(ply.xyz()) & (ply.opacity() > min_opacity)).sum())
-
-
-def prune(ply: Ply, ego: EgoPath, giant_m: float = 3.0, giant_max_opacity: float = 0.2) -> tuple[Ply, dict[str, int]]:
-    """Drop every splat inside the ego tube, and giant faint ones (any axis > giant_m metres with
-    opacity < giant_max_opacity): the haze that makes renders look flat. Returns (kept, counts)."""
-    tube = ego.tube_mask(ply.xyz())
-    giant = (ply.max_scale() * ego.mpu > giant_m) & (ply.opacity() < giant_max_opacity)
-    drop = tube | giant
-    counts = {
-        "before": len(ply),
-        "tube": int(tube.sum()),
-        "giant": int((giant & ~tube).sum()),
-        "after": int((~drop).sum()),
-    }
-    return ply.subset(~drop), counts

@@ -8,12 +8,14 @@ otrv suggest                               best 20 s windows of 10-40 mph drivin
 otrv egomask                               optional, once: mask your car's body (needs 8+ clips)
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
+otrv clean drive1                          re-run the post-train prune + dehaze with other thresholds
 otrv view drive1                           open the replay viewer
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import errno
 import importlib.util
 import json
@@ -25,7 +27,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
+from . import bench, brush, clean, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -58,6 +60,76 @@ def _kinds(value: str) -> tuple[str, ...]:
     if bad or not kinds:
         raise argparse.ArgumentTypeError(f"choose from {', '.join(ingest.KINDS)} (comma-separated), got {value!r}")
     return kinds
+
+
+OPAC_LOSS_WEIGHT = 1e-9  # Brush default; 1e-7 is the first A/B (docs/HILL_CLIMB.md), 1e-6 collapsed the smoke scene
+SCALE_LOSS_WEIGHT = 1e-8  # Brush's default, passed explicitly so it's recorded and A/B-able
+
+
+def add_clean_args(a: argparse.ArgumentParser) -> None:
+    """Flags for the post-train clean-up (clean.Rules), shared by `recon` and `clean`."""
+    r = clean.Rules()
+    a.add_argument(
+        "--prune",
+        action=argparse.BooleanOptionalAction,
+        default=r.prune,
+        help="drop splats inside the car's swept path (1 m either side, 0.15-1.6 m up) and giant faint ones",
+    )
+    a.add_argument(
+        "--dehaze",
+        action=argparse.BooleanOptionalAction,
+        default=r.dehaze,
+        help="drop near-invisible, large translucent and needle splats and far ground fog (counts in clean.json)",
+    )
+    a.add_argument("--min-opacity", type=float, default=r.min_opacity, help="dehaze: drop splats below this opacity")
+    a.add_argument(
+        "--translucent-scale",
+        type=float,
+        default=r.translucent_scale_m,
+        help="dehaze: metres; splats with a larger axis and opacity under --translucent-opacity go",
+    )
+    a.add_argument("--translucent-opacity", type=float, default=r.translucent_opacity, help="see --translucent-scale")
+    a.add_argument(
+        "--needle-ratio",
+        type=float,
+        default=r.needle_ratio,
+        help="dehaze: largest/smallest axis above this with opacity under --needle-opacity is a needle",
+    )
+    a.add_argument("--needle-opacity", type=float, default=r.needle_opacity, help="see --needle-ratio")
+    a.add_argument(
+        "--ground-fog-m",
+        type=float,
+        default=r.ground_fog_m,
+        help="dehaze: drop splats farther than this (metres) from the path within 1 m of road height",
+    )
+    a.add_argument(
+        "--dehaze-sky",
+        action="store_true",
+        help="dehaze: also drop pale bright splats above eye level nearer than --sky-fog-m (sky painted at a "
+        "finite depth); ignored when the sky was trained transparent (--sky alpha)",
+    )
+    a.add_argument("--sky-fog-m", type=float, default=r.sky_fog_m, help="see --dehaze-sky (metres)")
+    a.add_argument("--sky-fog-saturation", type=float, default=r.sky_fog_saturation, help="see --dehaze-sky")
+    a.add_argument("--sky-fog-brightness", type=float, default=r.sky_fog_brightness, help="see --dehaze-sky")
+
+
+def clean_rules(args, sky_mode: str | None) -> clean.Rules:
+    if args.dehaze_sky and sky_mode == "alpha":
+        print("--dehaze-sky skipped: the sky was trained transparent (--sky alpha), so there is no sky fog to cut")
+    return clean.Rules(
+        prune=args.prune,
+        dehaze=args.dehaze,
+        min_opacity=args.min_opacity,
+        translucent_scale_m=args.translucent_scale,
+        translucent_opacity=args.translucent_opacity,
+        needle_ratio=args.needle_ratio,
+        needle_opacity=args.needle_opacity,
+        ground_fog_m=args.ground_fog_m,
+        sky_fog=args.dehaze_sky and sky_mode != "alpha",
+        sky_fog_m=args.sky_fog_m,
+        sky_fog_saturation=args.sky_fog_saturation,
+        sky_fog_brightness=args.sky_fog_brightness,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -165,11 +237,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--seed", type=int, default=42, help="Brush random seed (fixed, so A/B runs differ by the lever)")
     a.add_argument(
-        "--prune",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="after training, drop splats inside the car's swept path and giant faint ones (counts in prune.json)",
+        "--opac-loss-weight",
+        type=float,
+        default=OPAC_LOSS_WEIGHT,
+        help="Brush opacity regulariser (Brush's own default 1e-9): higher kills translucent haze during training",
     )
+    a.add_argument(
+        "--scale-loss-weight",
+        type=float,
+        default=SCALE_LOSS_WEIGHT,
+        help="Brush scale regulariser (Brush's own default 1e-8): higher discourages huge splats",
+    )
+    add_clean_args(a)
     a.add_argument(
         "--sky",
         choices=sky.MODES,
@@ -188,6 +267,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="match every camera's colour to the front camera (LAB mean/std over a running 4 s window)",
     )
+
+    a = cmd("clean", "re-run the post-train clean-up (ego-path prune + dehaze) on a trained splat, no retraining")
+    a.add_argument("name", help="run name")
+    add_clean_args(a)
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -310,7 +393,15 @@ def cmd_recon(args) -> None:
         timings["dense_init"] = time.perf_counter() - t0
     sky.apply(dense, args.sky)  # last: it can turn images into RGBA .png and rename them
     t0 = time.perf_counter()
-    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, ["--seed", str(args.seed)], args.prune)
+    brush_args = ["--seed", str(args.seed)]
+    brush_args += [
+        "--opac-loss-weight",
+        f"{args.opac_loss_weight:g}",
+        "--scale-loss-weight",
+        f"{args.scale_loss_weight:g}",
+    ]
+    rules = clean_rules(args, args.sky)
+    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, brush_args, rules)
     timings["train"] = time.perf_counter() - t0
     timings_path.write_text(json.dumps({k: round(v, 1) for k, v in timings.items()}))
     (work / "recon_args.json").write_text(
@@ -321,14 +412,33 @@ def cmd_recon(args) -> None:
                 "rig": not args.no_rig,
                 "eval": args.eval,
                 "seed": args.seed,
-                "prune": args.prune,
+                "opac_loss_weight": args.opac_loss_weight,
+                "scale_loss_weight": args.scale_loss_weight,
                 "sky": args.sky,
                 "dense_init": args.dense_init,
                 "color_norm": args.color_norm,
+                "clean": dataclasses.asdict(rules),
             }
         )
     )
     print(f"done: `otrv view {args.name}` to replay it, `otrv bench {args.name}` to score it")
+
+
+def cmd_clean(args) -> None:
+    """Re-clean from the untouched trained splat (scene_raw.ply), so runs with different rules compare."""
+    work = need_recon(args.name, "viewer/path.json")
+    recon_args_path = work / "recon_args.json"
+    rargs = json.loads(recon_args_path.read_text()) if recon_args_path.exists() else {}
+    src = work / "viewer" / "scene_raw.ply"
+    if not src.exists():
+        src = work / "splat" / f"splat_{rargs.get('steps')}.ply"
+    if not src.exists():
+        raise SystemExit(f"{args.name} has no trained splat (viewer/scene_raw.ply): run `otrv recon {args.name}` first")
+    rules = clean_rules(args, rargs.get("sky"))
+    clean.run(work, src, rules)
+    if rargs:  # the card's config should describe the scene that's now in viewer/
+        rargs["clean"] = dataclasses.asdict(rules)
+        recon_args_path.write_text(json.dumps(rargs))
 
 
 def cmd_view(args) -> None:
@@ -390,6 +500,8 @@ def dispatch(args) -> None:
         )
     elif c == "recon":
         cmd_recon(args)
+    elif c == "clean":
+        cmd_clean(args)
     elif c == "bench":
         work = need_prep(args.name)
         if not recon_attempted(work):

@@ -182,6 +182,22 @@ def test_studio_page_points_at_the_cities_origin(client):
     assert f'<meta name="otrv-cities" content="{CITY_BASE}">' in client.get("/").text
 
 
+@pytest.mark.parametrize("has_drive", [False, True])
+def test_viewer_features_gate_the_drive_button(client, monkeypatch, has_drive):
+    page = "<html><script>window.otrvDrive = {};</script></html>" if has_drive else "<html>viewer v1</html>"
+    monkeypatch.setattr(server, "viewer_html_text", lambda: page)
+    assert client.get("/api/viewer", headers=AUTH).json() == {"base": CITY_BASE, "drive": has_drive}
+
+
+def test_drive_button_uses_the_viewer_v2_deep_link():
+    """Viewer v2 (#15) contract: drive mode is /cities/<name>/#cam=drive; the old ?mode=drive is gone, and
+    the button is gated on /api/viewer's `drive`."""
+    js = (server.STATIC / "app.js").read_text()
+    assert 'cityUrl(name, "#cam=drive")' in js and "mode=drive" not in js
+    assert "driveButton(job.name, viewerInfo.drive)" in js and "driveButton(c.name, drive)" in js
+    assert 'api("/api/viewer")' in js
+
+
 def test_gallery_and_delete(tmp_path):
     app, cfg, _ = make_app(tmp_path)
     c = TestClient(app, base_url=BASE)

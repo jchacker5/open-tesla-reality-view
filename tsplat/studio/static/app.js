@@ -37,6 +37,21 @@ async function api(path, opts = {}) {
   return data;
 }
 
+// Drive mode is viewer v2 (window.otrvDrive, deep link #cam=drive). /api/viewer says whether the served
+// viewer has it; without it the button is disabled with a tooltip instead of opening a plain replay.
+let viewerInfo = null;
+async function viewerFeatures() {
+  if (!viewerInfo) {
+    try { viewerInfo = await api("/api/viewer"); } catch { viewerInfo = { drive: false }; }
+  }
+  return viewerInfo;
+}
+function driveButton(name, drive) {
+  if (drive) return h("a", { class: "btn primary", href: cityUrl(name, "#cam=drive"), target: "_blank", rel: "noopener" }, icon("car"), "Drive");
+  return h("span", { class: "btn-wrap", title: "Drive mode needs viewer v2 (the served viewer has no window.otrvDrive yet); Replay works" },
+    h("button", { class: "primary", disabled: true, "aria-label": "Drive (needs viewer v2)" }, icon("car"), "Drive"));
+}
+
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -736,7 +751,7 @@ function overallPct(j, w = weights) {
 }
 
 async function drawJob(name, box) {
-  await stageWeights();
+  await Promise.all([stageWeights(), viewerFeatures()]);
   let job = await api(`/api/jobs/${encodeURIComponent(name)}`);
   const clip = job.spec.clip;
   const etaV = h("div", { class: "v" });
@@ -814,7 +829,7 @@ async function drawJob(name, box) {
     if (job.state === "done") {
       doneBox.replaceChildren(h("div", {}, h("b", { text: "Your city is ready." }), h("div", { class: "muted", text: "Drive through it, or replay the chase cam." })),
         h("div", { class: "row" },
-          h("a", { class: "btn primary", href: cityUrl(job.name, "?mode=drive"), target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
+          driveButton(job.name, viewerInfo.drive),
           h("a", { class: "btn", href: cityUrl(job.name), target: "_blank", rel: "noopener" }, icon("replay"), "Replay")));
     }
     actions.replaceChildren();
@@ -892,7 +907,7 @@ async function drawJob(name, box) {
 // ---- Gallery ------------------------------------------------------------------------------------------
 
 async function pageGallery(view) {
-  const { cities } = await api("/api/cities");
+  const [{ cities }, { drive }] = await Promise.all([api("/api/cities"), viewerFeatures()]);
   const grid = h("div", { class: "grid" });
   view.append(h("div", { class: "page-head" },
     h("div", {}, h("div", { class: "eyebrow", text: "Built on this Mac" }), h("h1", { text: "Gallery" }),
@@ -918,7 +933,7 @@ async function pageGallery(view) {
           h("div", {}, h("b", { text: bytes(c.splat_bytes) }), "splat"),
           h("div", {}, h("b", { text: bytes(c.disk_bytes) }), "on disk")),
         h("div", { class: "city-actions" },
-          h("a", { class: "btn primary", href: cityUrl(c.name, "?mode=drive"), target: "_blank", rel: "noopener" }, icon("car"), "Drive"),
+          driveButton(c.name, drive),
           h("a", { class: "btn", href: cityUrl(c.name), target: "_blank", rel: "noopener" }, icon("replay"), "Replay"),
           h("button", { class: "danger", title: "Delete this city", "aria-label": `Delete ${c.name}`, onclick: async () => {
             if (!(await confirmDialog(`Delete ${c.name}?`, `Removes work/${c.name} (${bytes(c.disk_bytes)}): the splat, frames and models. Your footage is not touched.`))) return;

@@ -453,6 +453,12 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
     def need_city(name: str) -> Path:
         return _city_dir(cfg, name)
 
+    @app.get("/api/viewer")
+    def get_viewer():
+        """Where city pages live, and what the served viewer can do. Drive mode is viewer v2 (#15): its
+        page defines window.otrvDrive and takes the #cam=drive deep link; until then the button is hidden."""
+        return {"base": cfg.city_base, "drive": viewer_supports_drive()}
+
     @app.get("/api/cities")
     def list_cities():
         return {"cities": builds.cities(cfg.work)}
@@ -552,6 +558,14 @@ def create_city_app(cfg: Config) -> CityGuard:
         raise HTTPException(404, "not found")
 
     return CityGuard(app, cfg)
+
+
+def viewer_supports_drive() -> bool:
+    """Drive mode is in the served viewer (viewer v2 defines window.otrvDrive)."""
+    try:
+        return "otrvDrive" in viewer_html_text()
+    except OSError:
+        return False
 
 
 def viewer_dir() -> Path | None:

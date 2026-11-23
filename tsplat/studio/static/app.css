@@ -78,6 +78,8 @@ button, .btn {
 }
 button:hover, .btn:hover { border-color: #3a404b; background: var(--panel-3); }
 button:disabled { opacity: .45; cursor: default; }
+.btn-wrap { display: inline-flex; cursor: not-allowed; }
+.btn-wrap > button:disabled { pointer-events: none; }  /* so the wrapper shows its tooltip */
 button.primary, .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.primary:hover, .btn.primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
 button.ghost, .btn.ghost { background: transparent; }

@@ -21,7 +21,7 @@ shows their status.
 | **Drives** | Consecutive clips grouped into drives. Each card shows four camera thumbnails, the date, length, mean speed, a speed sparkline and the GPS route from the clips' SEI telemetry (drawn as an SVG line, no map tiles), plus a **Best window** badge from `otrv suggest`'s scoring. |
 | **Drive detail** | The front camera with the other cameras synced below it. A speed strip over the whole drive has a draggable build window (20-60 s, kept inside one clip). It also shows suggested windows, a build-time estimate and **Build**. **Advanced** sets fps, training steps, YOLO mover masking, held-out scoring (PSNR) and the name. |
 | **Build** | A FIFO queue (one GPU, one build at a time). Each build has a stage stepper (frames → masks → features → match → map → undistort → train → export) with a progress bar per stage, the overall ETA, a log tail, and **Cancel** / **Resume**. |
-| **Gallery** | Finished cities: a poster (first front frame), date, splat size, disk use and PSNR, with **Drive** (`/cities/<name>/?mode=drive`), **Replay** and **Delete**. |
+| **Gallery** | Finished cities: a poster (first front frame), date, splat size, disk use and PSNR, with **Drive** (`<cities>/cities/<name>/#cam=drive`, viewer v2; disabled with a tooltip while the served viewer has no `window.otrvDrive`), **Replay** and **Delete**. |
 
 ## Privacy and security
 
@@ -115,6 +115,7 @@ POST /api/jobs {clip, start, dur, fps, steps, mask_movers, eval, name}
 GET  /api/jobs           GET /api/jobs/{id}              GET /api/jobs/{id}/events (SSE)
 POST /api/jobs/{id}/cancel   POST /api/jobs/{id}/resume  POST /api/jobs/{id}/kill (orphaned-running only)
 GET  /api/cities         DELETE /api/cities/{name}       GET /api/cities/{name}/poster.jpg
+GET  /api/viewer         {base, drive}: the cities origin, and whether the served viewer has drive mode
 ```
 
 On the cities server (`<port+1>`, no token):

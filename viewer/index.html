@@ -290,7 +290,12 @@ function setMode(m) {
   mode = m;
   for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
   controls.enabled = m === "free";
-  if (m === "free") controls.target.copy(poseAt(clock).road);
+  if (m === "free") {
+    const { road, f } = poseAt(clock);
+    controls.target.copy(road);
+    // coming from the driver view the camera is inside the car: start from the chase position instead
+    if (camera.position.distanceTo(road) < 6 * M) camera.position.copy(road).addScaledVector(f, -9 * M).addScaledVector(UP, 4.2 * M);
+  }
   first = true;
 }
 $("mChase").onclick = () => setMode("chase");

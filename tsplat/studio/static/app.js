@@ -805,7 +805,7 @@ async function drawJob(name, box) {
       x.bar.style.width = `${(isDone ? 1 : f) * 100}%`;
       x.t.textContent = isDone ? (x.secs !== null ? clock(x.secs) : "done") : active ? (job.stage_eta !== null && job.stage_eta !== undefined && f > 0 ? `${Math.round(f * 100)}% · ${human(job.stage_eta)}` : f > 0 ? `${Math.round(f * 100)}%` : "running") : "";
     });
-    errBox.hidden = !(job.state === "failed" || job.state === "interrupted") || !job.error;
+    errBox.hidden = !["failed", "interrupted", "orphaned-running"].includes(job.state) || !job.error;
     errBox.textContent = job.error || "";
     doneBox.hidden = job.state !== "done";
     if (job.state === "done") {
@@ -820,6 +820,19 @@ async function drawJob(name, box) {
         if (!(await confirmDialog("Cancel this build?", "The current step stops (SIGTERM, then SIGKILL after 5 s). Finished stages are kept, so you can resume.", "Cancel build"))) return;
         job = await api(`/api/jobs/${encodeURIComponent(job.name)}/cancel`, { method: "POST" }); paint();
       } }, icon("x"), "Cancel"));
+    }
+    if (job.state === "orphaned-running") {
+      actions.append(h("button", { class: "sm danger", onclick: async () => {
+        if (!(await confirmDialog("Kill the leftover build?", `An earlier studio session left this build running (process group ${job.pgid}). Kill it (SIGTERM, then SIGKILL after 5 s) so it can be resumed here.`, "Kill build"))) return;
+        try {
+          job = await api(`/api/jobs/${encodeURIComponent(job.name)}/kill`, { method: "POST" });
+          for (let i = 0; i < 20 && job.state === "orphaned-running"; i++) {  // SIGKILL comes after 5 s at most
+            await new Promise((r) => setTimeout(r, 500));
+            job = await api(`/api/jobs/${encodeURIComponent(job.name)}`);
+          }
+          paint();
+        } catch (e) { toast(e.message, true); }
+      } }, icon("x"), "Kill"));
     }
     if (["failed", "cancelled", "interrupted"].includes(job.state)) {
       actions.append(h("button", { class: "sm primary", onclick: async () => {

@@ -72,13 +72,21 @@ Files in `work/<name>/`:
 
 | File | Contents |
 |---|---|
-| `job.json` | spec and state. A build that was running when the studio stopped comes back as *interrupted*. |
+| `job.json` | spec, state and the running command's process-group id (`pgid`). A build that was running when the studio stopped comes back as *interrupted*, or as *orphaned-running* if its process group is still alive (see below). |
 | `events.jsonl` | one event per line, with ids that keep increasing across resumes. `GET /api/jobs/<name>/events` streams it as SSE and honours `Last-Event-ID`, so a reconnecting browser replays only what it missed. |
 | `stages/<stage>.done` | `{"seconds", "units"}`. Resume skips every phase whose stages are all done. |
 | `studio.log` | raw output |
 
 **Cancel** sends SIGTERM to the process group (otrv and its colmap/brush children), then SIGKILL after
 5 s. **Resume** re-queues a failed, cancelled or interrupted build.
+
+**Stopping the studio** (ctrl-c, SIGTERM or SIGHUP; a second ctrl-c skips the wait) ends open SSE
+streams at once, gives other responses 3 s (`timeout_graceful_shutdown`), then kills the running build's
+process group the same way (SIGTERM, SIGKILL after 5 s) and marks it *interrupted*, so it resumes later.
+A build whose command was stopped by SIGTERM from outside is also *interrupted*, not *failed*. If a
+studio dies without that cleanup (SIGKILL, a crash), the next one reads `pgid` from `job.json`: a group
+that is still alive makes the job *orphaned-running*. Resume is refused until it's gone; **Kill**
+(`POST /api/jobs/{id}/kill`, or Cancel) ends it, and the job becomes *interrupted*.
 
 **ETA** is the current stage's own estimate (Brush's, or the progress rate so far) plus a prior for
 each remaining stage. The priors are this Mac's median seconds per image (or per training step) from
@@ -98,7 +106,7 @@ GET  /api/clips/{key}    GET /api/clips/{key}/thumb.jpg?cam=front    GET /api/cl
 GET  /api/estimate?cams=4&dur=20&fps=3&steps=15000
 POST /api/jobs {clip, start, dur, fps, steps, mask_movers, eval, name}
 GET  /api/jobs           GET /api/jobs/{id}              GET /api/jobs/{id}/events (SSE)
-POST /api/jobs/{id}/cancel                               POST /api/jobs/{id}/resume
+POST /api/jobs/{id}/cancel   POST /api/jobs/{id}/resume  POST /api/jobs/{id}/kill (orphaned-running only)
 GET  /api/cities         DELETE /api/cities/{name}       GET /api/cities/{name}/poster.jpg
 GET  /cities/{name}/     the viewer, serving work/<name>/viewer/ (byte ranges)
 ```

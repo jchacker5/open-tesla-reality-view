@@ -5,7 +5,8 @@ the whole process group: otrv -> colmap / brush) under a PTY (so Brush prints it
 is parsed by progress.Tracker and written to work/<name>/events.jsonl, which the server streams over SSE.
 
 work/<name>/
-  job.json         spec + state (survives restarts; a job that was running becomes "interrupted")
+  job.json         spec + state + the build's process-group id (survives restarts: a job that was running
+                   becomes "interrupted", or "orphaned-running" while its process group is still alive)
   events.jsonl     {"id", "t", "type", ...} one per line; ids increase across resumes
   studio.log       raw output
   stages/<s>.done  {"seconds", "units"}: completed stages (skipped on resume, and the ETA prior)
@@ -31,12 +32,62 @@ from pathlib import Path
 from . import progress
 
 TERMINAL = ("done", "failed", "cancelled", "interrupted")
+# A job that was running when an earlier studio died and whose process group is still alive. Not terminal
+# (it still holds work/<name> and the GPU); resume is refused until it's gone, and cancel/kill ends it.
+ORPHANED = "orphaned-running"
+INTERRUPTED_MSG = "the studio stopped while this build was running; resume to continue"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")
 KILL_GRACE = 5.0  # seconds between SIGTERM and SIGKILL
 
 
 def valid_name(name: str) -> bool:
     return bool(NAME_RE.fullmatch(name)) and ".." not in name
+
+
+def pgid_alive(pgid: int | None) -> bool:
+    """True if any process is still in process group `pgid`."""
+    if not pgid or pgid <= 1:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, but not ours
+        return True
+    return True
+
+
+def kill_group(pgid: int, grace: float | None = None, proc: subprocess.Popen | None = None) -> None:
+    """SIGTERM process group `pgid`, wait up to `grace` seconds for it to go, then SIGKILL what's left.
+    Blocks; with `proc` (the group leader, our child) it is also reaped."""
+    grace = KILL_GRACE if grace is None else grace
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    end = time.monotonic() + grace
+    while time.monotonic() < end:
+        if proc is not None:
+            try:
+                proc.wait(0.05)
+            except subprocess.TimeoutExpired:
+                continue
+            proc = None  # leader reaped; grandchildren may linger
+        elif not pgid_alive(pgid):
+            return
+        else:
+            time.sleep(0.05)
+    try:
+        os.killpg(pgid, signal.SIGKILL)  # also reaps grandchildren that ignored SIGTERM
+    except (ProcessLookupError, PermissionError):
+        pass
+    if proc is not None:
+        try:
+            proc.wait(2)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 @dataclass
@@ -67,7 +118,9 @@ class Job:
     stage_eta: float | None = None
     eta: float | None = None
     attempts: int = 0
+    pgid: int | None = None  # process group of the running command (recorded in job.json)
     cancel_requested: bool = False
+    interrupted: bool = False  # stopped by SIGTERM (studio shutdown, or someone else): resumable
     proc: subprocess.Popen | None = None
 
     def to_dict(self) -> dict:
@@ -85,6 +138,7 @@ class Job:
             "stage_eta": self.stage_eta,
             "eta": self.eta,
             "attempts": self.attempts,
+            "pgid": self.pgid,
             "stages_done": [s for s in progress.STAGES if (self.dir / "stages" / f"{s}.done").exists()],
         }
 
@@ -102,12 +156,20 @@ class Job:
         except (OSError, ValueError):
             return None
         job = cls(name=d["name"], dir=path.parent, spec=d.get("spec", {}))
-        for k in ("state", "created", "started", "finished", "error", "stage", "frac", "attempts"):
+        for k in ("state", "created", "started", "finished", "error", "stage", "frac", "attempts", "pgid"):
             if k in d and d[k] is not None:
                 setattr(job, k, d[k])
-        if job.state in ("queued", "running"):  # the server stopped mid-build
-            job.state = "interrupted"
-            job.error = job.error or "the studio stopped while this build was running; resume to continue"
+        if job.state in ("running", ORPHANED) and pgid_alive(job.pgid):
+            # an earlier studio died without killing its build, which is still running: don't start a
+            # second one over the same work dir
+            job.state = ORPHANED
+            job.error = (
+                f"a build from an earlier studio session is still running (process group {job.pgid}); "
+                "kill it before resuming"
+            )
+        elif job.state in ("queued", "running", ORPHANED):  # the server stopped mid-build
+            job.state, job.pgid = "interrupted", None
+            job.error = INTERRUPTED_MSG
         return job
 
 
@@ -207,14 +269,26 @@ class Runner:
             self._thread.start()
 
     def stop(self, timeout: float = 10) -> None:
+        """Stop the worker and the running build: SIGTERM its process group, SIGKILL after KILL_GRACE
+        seconds. The build is marked "interrupted" (resumable). Blocks until done; safe to call twice."""
         with self.cond:
             self._stop = True
             self.cond.notify_all()
         job = self.current
-        if job and job.proc:
-            self._kill(job.proc)
+        if job:
+            job.interrupted = True
+            proc = job.proc
+            if proc and proc.poll() is None:
+                kill_group(proc.pid, proc=proc)
         if self._thread:
             self._thread.join(timeout)
+        if job and job.state not in TERMINAL:  # the worker didn't get there in time (or is stuck in-process)
+            job.proc = job.pgid = None
+            self._set_state(job, "interrupted", INTERRUPTED_MSG)
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop
 
     # ---- API ----
 
@@ -229,9 +303,19 @@ class Runner:
             return self._logs[name]
 
     def get(self, name: str) -> Job | None:
-        return self.jobs.get(name)
+        job = self.jobs.get(name)
+        if job and job.state == ORPHANED:
+            self._reap_orphan(job)
+        return job
+
+    def _reap_orphan(self, job: Job) -> None:
+        if job.state == ORPHANED and not pgid_alive(job.pgid):
+            job.pgid = None
+            self._set_state(job, "interrupted", "the orphaned build has stopped; resume to continue")
 
     def list(self) -> list[Job]:
+        for job in list(self.jobs.values()):
+            self._reap_orphan(job)
         return sorted(self.jobs.values(), key=lambda j: j.created, reverse=True)
 
     def submit(self, name: str, spec: dict) -> Job:
@@ -259,6 +343,11 @@ class Runner:
             job = self.jobs.get(name)
             if not job:
                 raise KeyError(name)
+            self._reap_orphan(job)
+            if job.state == ORPHANED:
+                raise ValueError(
+                    f"{name} is still running from an earlier studio session (process group {job.pgid}); kill it first"
+                )
             if job.state not in ("failed", "cancelled", "interrupted"):
                 raise ValueError(f"{name} is {job.state}; only failed, cancelled or interrupted builds resume")
             job.state, job.error, job.cancel_requested, job.finished = "queued", None, False, None
@@ -275,6 +364,8 @@ class Runner:
                 raise KeyError(name)
             if job.state in TERMINAL:
                 return job
+            if job.state == ORPHANED:
+                return self.kill_orphan(name)
             job.cancel_requested = True
             if job.state == "queued":
                 if name in self.queue:
@@ -284,6 +375,28 @@ class Runner:
             proc = job.proc
         if proc:
             self._kill(proc)
+        return job
+
+    def kill_orphan(self, name: str, wait: bool = False) -> Job:
+        """Kill the process group of an orphaned-running job (SIGTERM, SIGKILL after KILL_GRACE s); the
+        job becomes "interrupted" once the group is gone. Returns at once unless `wait`."""
+        job = self.jobs.get(name)
+        if not job:
+            raise KeyError(name)
+        if job.state != ORPHANED:
+            raise ValueError(f"{name} is {job.state}, not orphaned")
+        pgid = job.pgid
+
+        def run():
+            if pgid:
+                kill_group(pgid)
+            with self.cond:
+                self._reap_orphan(job)
+
+        if wait:
+            run()
+        else:
+            threading.Thread(target=run, name=f"otrv-kill-{pgid}", daemon=True).start()
         return job
 
     def forget(self, name: str) -> None:
@@ -312,28 +425,11 @@ class Runner:
 
     @staticmethod
     def _kill(proc: subprocess.Popen, grace: float | None = None) -> None:
-        """SIGTERM the process group, then SIGKILL it if it's still alive after `grace` seconds."""
-        grace = KILL_GRACE if grace is None else grace
-        try:
-            pgid = os.getpgid(proc.pid)
-        except ProcessLookupError:
+        """In the background: SIGTERM the process group, then SIGKILL it if still alive after `grace` s."""
+        if proc.poll() is not None and not pgid_alive(proc.pid):
             return
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-
-        def hard_kill():
-            try:
-                proc.wait(grace)
-            except subprocess.TimeoutExpired:
-                pass
-            try:
-                os.killpg(pgid, signal.SIGKILL)  # also reaps grandchildren that ignored SIGTERM
-            except (ProcessLookupError, PermissionError):
-                pass
-
-        threading.Thread(target=hard_kill, daemon=True).start()
+        # start_new_session: the group id is the leader's pid, even after the leader has exited
+        threading.Thread(target=kill_group, args=(proc.pid, grace), daemon=True).start()
 
     def _worker(self) -> None:
         while True:
@@ -352,7 +448,7 @@ class Runner:
             except Exception as e:  # never let one job kill the worker
                 self._set_state(job, "failed", f"{type(e).__name__}: {e}")
             finally:
-                job.proc = None
+                job.proc = job.pgid = None
                 self.current = None
 
     def _run(self, job: Job) -> None:
@@ -371,14 +467,15 @@ class Runner:
         job.started, job.attempts = job.started or time.time(), job.attempts + 1
         self._set_state(job, "running")
         ctx = _Ctx(self, job, log, tracker, n_images, steps)
+        job.interrupted = False
         try:
             for phase in todo:
-                if job.cancel_requested:
+                if job.cancel_requested or job.interrupted or self._stop:
                     break
                 log.emit({"type": "phase", "phase": phase.name})
                 ctx.emit(tracker.begin(phase.stages[0]))
                 ok, err = ctx.run_phase(phase)
-                if job.cancel_requested:
+                if job.cancel_requested or ((job.interrupted or self._stop) and not ok):
                     break
                 if ok:
                     ctx.emit(tracker.finish(phase.stages[-1]))
@@ -390,8 +487,11 @@ class Runner:
                     ctx.emit(tracker.finish(phase.stages[-1]))
         finally:
             ctx.close()
+        job.pgid = None
         if job.cancel_requested:
             self._set_state(job, "cancelled")
+        elif job.interrupted or self._stop:
+            self._set_state(job, "interrupted", INTERRUPTED_MSG if self._stop else _SIGTERM_MSG)
         else:
             job.stage = progress.STAGES[-1]
             self._set_state(job, "done")
@@ -497,8 +597,9 @@ class _Ctx:
             os.close(slave)
             return False, f"{phase.name}: could not start {phase.run[0]}: {e}"
         os.close(slave)
-        self.job.proc = proc
-        if self.job.cancel_requested:  # cancel raced with the start
+        self.job.proc, self.job.pgid = proc, proc.pid  # start_new_session: pgid == pid
+        self.job.save()  # so a restarted studio can tell whether this build outlived it
+        if self.job.cancel_requested or self.r.stopping:  # cancel/stop raced with the start
             Runner._kill(proc)
         tail: list[str] = []
         buf = ""
@@ -530,8 +631,14 @@ class _Ctx:
             return True, None
         if self.job.cancel_requested:
             return False, "cancelled"
+        if self.r.stopping or rc in (-signal.SIGTERM, 128 + signal.SIGTERM):
+            self.job.interrupted = True  # a graceful stop, not a crash: resumable
+            return False, "interrupted"
         last = next((t for t in reversed(tail) if t and not self.tracker.is_progress_line(t)), "")
         return False, f"{phase.name} exited with code {rc}" + (f": {last}" if last else "")
+
+
+_SIGTERM_MSG = "the build was stopped by SIGTERM; resume to continue"
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:

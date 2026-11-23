@@ -12,16 +12,17 @@ import asyncio
 import json
 import secrets
 import shutil
+import signal
 import socket
 import sys
 import threading
 import time
 import webbrowser
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +31,7 @@ from starlette.datastructures import Headers, MutableHeaders
 
 from .. import doctor, ingest, speed
 from . import builds, footage, progress
-from .jobs import TERMINAL, Runner, valid_name
+from .jobs import ORPHANED, TERMINAL, Runner, valid_name
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "otrv_studio"
@@ -52,6 +53,8 @@ class Config:
         self.port = port
         self.token = token or secrets.token_urlsafe(24)
         self.cwd = cwd or Path.cwd()
+        # set when the process is asked to stop (SIGINT/SIGTERM/SIGHUP): long-lived responses (SSE) end
+        self.stopping = threading.Event()
         hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
         self.hosts = set(hosts)
         self.origins = {f"http://{h}" for h in hosts}
@@ -65,6 +68,7 @@ class Guard:
 
     def __init__(self, app, cfg: Config):
         self.app, self.cfg = app, cfg
+        self.runner: Runner | None = None
 
     def _token_ok(self, value: str | None) -> bool:
         return bool(value) and secrets.compare_digest(value.encode(), self.cfg.token.encode())
@@ -166,6 +170,7 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
         run.start()
         lib.scan()
         yield
+        cfg.stopping.set()
         await asyncio.to_thread(run.stop, 8)
 
     app = FastAPI(title="otrv studio", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -372,9 +377,19 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
 
-    @app.get("/api/jobs/{name}/events", response_class=EventSourceResponse)
-    async def job_events(name: str, request: Request, after: int = 0):
+    @app.post("/api/jobs/{name}/kill")
+    def kill_job(name: str):
+        """Kill a build left running by an earlier studio session (state "orphaned-running")."""
         need_job(name)
+        try:
+            return run.kill_orphan(name).to_dict()
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.get("/api/jobs/{name}/events", response_class=EventSourceResponse)
+    async def job_events(name: str, request: Request, after: int = 0, _job=Depends(need_job)):  # noqa: B008
+        # need_job runs as a dependency, before the stream starts, so an unknown job is a plain 404 (with
+        # `from __future__ import annotations`, Annotated can't see this closure, hence the default)
         try:
             after = max(after, int(request.headers.get("last-event-id") or 0))
         except ValueError:
@@ -400,11 +415,11 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
                     after = ev["id"]
                     yield ServerSentEvent(raw_data=line.decode(), id=str(ev["id"]))
             job = run.get(name)
-            if not chunk and (job is None or job.state in TERMINAL):
+            if not chunk and (job is None or job.state in TERMINAL or job.state == ORPHANED):
                 yield ServerSentEvent(event="end", raw_data="{}")
                 return
-            if await request.is_disconnected():
-                return
+            if cfg.stopping.is_set() or await request.is_disconnected():
+                return  # the server is shutting down (uvicorn waits for open responses) or the tab closed
             if time.monotonic() - last_ping > 15:
                 last_ping = time.monotonic()
                 yield ServerSentEvent(comment="ping")
@@ -458,7 +473,9 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
             raise HTTPException(404, "not found")
         return FileResponse(p)
 
-    return Guard(app, cfg)
+    guard = Guard(app, cfg)
+    guard.runner = run
+    return guard
 
 
 def _locked_page() -> str:
@@ -476,9 +493,58 @@ def free_port(start: int, tries: int = 20) -> int:
     raise SystemExit(f"no free port in {start}-{start + tries - 1}; pass --port")
 
 
-def serve(data: str, port: int = 8770, open_browser: bool = True, work: str = "work") -> None:
+GRACEFUL_SHUTDOWN = 3.0  # seconds uvicorn waits for open responses before cancelling them
+STOP_SIGNALS = tuple(getattr(signal, s) for s in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, s))
+
+
+def run_servers(cfg: Config, apps: list[tuple[object, int]], runner: Runner) -> None:
+    """Serve each (asgi_app, port) on 127.0.0.1 until SIGINT/SIGTERM/SIGHUP (all three mean "stop"; a second
+    ctrl-c skips the graceful wait). Whatever happens, the running build's process group is killed on the way
+    out (SIGTERM, SIGKILL after 5 s) and the build is marked "interrupted", so nothing is left orphaned."""
     import uvicorn
 
+    class _Server(uvicorn.Server):
+        @contextmanager
+        def capture_signals(self):  # run_servers owns the signal handlers for every server
+            yield
+
+    servers = [
+        _Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                log_level="warning",
+                access_log=False,
+                timeout_graceful_shutdown=GRACEFUL_SHUTDOWN,
+            )
+        )
+        for app, port in apps
+    ]
+
+    def on_signal(sig, _frame):
+        cfg.stopping.set()  # ends SSE streams now instead of after the graceful-shutdown timeout
+        for s in servers:
+            if s.should_exit and sig == signal.SIGINT:
+                s.force_exit = True
+            s.should_exit = True
+
+    async def main():
+        await asyncio.gather(*(s.serve() for s in servers))
+
+    previous = {sig: signal.signal(sig, on_signal) for sig in STOP_SIGNALS}
+    try:
+        asyncio.run(main())
+    finally:
+        cfg.stopping.set()
+        try:
+            runner.stop()  # idempotent (the lifespan already did it after a graceful shutdown)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
+def serve(data: str, port: int = 8770, open_browser: bool = True, work: str = "work") -> None:
     port = free_port(port)
     cfg = Config(Path(data), Path(work).resolve(), port)
     app = create_app(cfg)
@@ -487,4 +553,5 @@ def serve(data: str, port: int = 8770, open_browser: bool = True, work: str = "w
     print("  local only (127.0.0.1); footage is read in place and never uploaded. ctrl-c to stop.", flush=True)
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
+    run_servers(cfg, [(app, port)], app.runner)
+    print("otrv studio: stopped", flush=True)

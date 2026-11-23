@@ -4,15 +4,15 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-BRUSH = os.environ.get("BRUSH", str(Path.home() / ".local/opt/brush/brush-app-aarch64-apple-darwin/brush_app"))
+from . import brush
 
 
 def sh(*args: str) -> None:
@@ -21,7 +21,13 @@ def sh(*args: str) -> None:
 
 
 def _registered(model: Path) -> int:
-    return (model / "images.bin").stat().st_size if (model / "images.bin").exists() else 0
+    """Number of registered images in a COLMAP model: images.bin starts with a little-endian uint64 count."""
+    f = model / "images.bin"
+    if not f.is_file():
+        return 0
+    with open(f, "rb") as fp:
+        head = fp.read(8)
+    return struct.unpack("<Q", head)[0] if len(head) == 8 else 0
 
 
 def _map(work: Path, db: Path, out: Path, global_mapper: bool, *extra: str) -> Path | None:
@@ -43,7 +49,7 @@ def _map(work: Path, db: Path, out: Path, global_mapper: bool, *extra: str) -> P
 
 
 def sfm(work: Path, global_mapper: bool = False, rig: bool = True) -> Path:
-    """Features -> rig-aware pairs -> mapping. With rig=True the 6 cameras are tied together as one
+    """Features -> rig-aware pairs -> mapping. With rig=True all cameras are tied together as one
     rigid rig (approximate Tesla layout as a prior), which keeps all cameras in a single model."""
     db = work / "colmap.db"
     if db.exists():
@@ -84,7 +90,7 @@ def sfm(work: Path, global_mapper: bool = False, rig: bool = True) -> Path:
             "COLMAP could not register the images. Try a window where the car is moving "
             "(10-40 mph), a higher --fps, --global-mapper, or --no-rig."
         )
-    print(f"using model {best} ({_registered(best)} bytes of poses)")
+    print(f"using model {best} ({_registered(best)} registered images)")
     return best
 
 
@@ -185,19 +191,26 @@ def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
     sp.write_text("\n".join(out) + "\n")
 
 
+def export_every(steps: int) -> int:
+    """Checkpoint interval that always lands on the final step, so splat_{steps}.ply is written."""
+    return steps // 4 if steps % 4 == 0 and steps // 4 >= 1000 else steps
+
+
 def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0) -> Path:
-    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`."""
+    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`.
+    splat/ is emptied first so a failed run can't leave an older run's splat or eval renders behind."""
     out = work / "splat"
-    out.mkdir(exist_ok=True)
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
     args = [
-        BRUSH,
+        brush.path(),
         str(dense),
         "--total-steps",
         str(steps),
         "--export-path",
         str(out),
         "--export-every",
-        str(max(1000, steps // 4)),
+        str(export_every(steps)),
         "--export-name",
         "splat_{iter}.ply",
     ]
@@ -206,8 +219,19 @@ def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0
     if eval_every:
         args += ["--eval-split-every", str(eval_every), "--eval-every", str(steps), "--eval-save-to-disk"]
     sh(*args)
-    final = max(out.glob("splat_*.ply"), key=lambda p: int(p.stem.split("_")[1]))
+    final = out / f"splat_{steps}.ply"
+    if not final.exists():
+        found = sorted(p.name for p in out.glob("splat_*.ply"))
+        if not found:
+            raise SystemExit(
+                f"Brush exported nothing to {out}. Check its output above; `otrv doctor` checks the install."
+            )
+        raise SystemExit(
+            f"Brush did not write the final splat {final.name} (found only {', '.join(found)}): "
+            "training stopped early. Check its output above."
+        )
     dest = work / "viewer" / "scene.ply"
+    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(final, dest)
     print(f"splat -> {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
     return dest
@@ -228,6 +252,33 @@ def _image_lines(dense: Path) -> list[str]:
     """Non-comment lines of images.txt, alternating pose / POINTS2D. Empty POINTS2D lines (images
     with no observations) are kept so that [::2] always selects pose lines."""
     return [line for line in (dense / "sparse" / "images.txt").read_text().splitlines() if not line.startswith("#")]
+
+
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz  # np.trapz was removed in NumPy 2.4
+
+
+def metres_driven(tel: list[dict], t0: float, t1: float) -> float:
+    """Distance from SEI speed integrated over the samples' real timestamps on [t0, t1] (speed is
+    interpolated at the span ends), so it is right whatever the video/sample rate."""
+    if len(tel) < 2 or t1 <= t0:
+        return 0.0
+    ts = np.array([s["t"] for s in tel], float)
+    mps = np.array([s["mph"] for s in tel], float) / 2.23694
+    order = np.argsort(ts)
+    ts, mps = ts[order], mps[order]
+    inner = (ts > t0) & (ts < t1)
+    grid = np.concatenate([[t0], ts[inner], [t1]])
+    return float(_trapezoid(np.interp(grid, ts, mps), grid))
+
+
+def metres_per_unit(tel: list[dict], t0: float, t1: float, units: float) -> float:
+    """Scene scale over the registered path's time span [t0, t1] (`units` = path length on that span)."""
+    if units <= 1e-6:
+        return 1.0
+    if tel:
+        metres = metres_driven(tel, t0, t1)
+        return metres / units if metres > 5 else 1.0
+    return 11.0 * (t1 - t0) / units  # no SEI: assume ~11 m/s (25 mph) so the chase cam distance is sane
 
 
 def export_path(work: Path, dense: Path) -> Path:
@@ -270,15 +321,9 @@ def export_path(work: Path, dense: Path) -> Path:
         for i, p, f in zip(idxs, Ps, F, strict=False)
     ]
 
-    scale = 1.0
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
-    if tel:
-        metres = sum(s["mph"] / 2.23694 * 0.1 for s in tel)  # 10 Hz samples
-        if units > 1e-6 and metres > 5:
-            scale = metres / units
-    else:  # no SEI: assume ~11 m/s (25 mph) so the chase cam distance is sane
-        scale = 11.0 * meta["dur"] / units if units > 1e-6 else 1.0
+    scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
     out = work / "viewer" / "path.json"
     out.write_text(
         json.dumps(

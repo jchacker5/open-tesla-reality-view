@@ -1,4 +1,4 @@
-"""Turn one 6-camera clip window into a COLMAP-ready dataset + viewer assets.
+"""Turn one 4- or 6-camera clip window into a COLMAP-ready dataset + viewer assets.
 
 work/<name>/
   images/<cam>/00000.jpg          frames sampled at --fps from every camera
@@ -6,13 +6,15 @@ work/<name>/
   rig_config.json            approximate Tesla camera layout, refined by COLMAP bundle adjustment
   pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours)
   viewer/cams/<cam>.mp4      trimmed, downscaled clips for the side panel
-  viewer/telemetry.json      SEI speed/GPS/steering at 10 Hz (if the clip has it)
+  viewer/telemetry.json      SEI speed/GPS/steering at ~10 Hz (if the clip has it)
+  meta.json                  clip id, window (dur = frames actually extracted / fps), cameras
 """
 
 from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -180,7 +182,7 @@ def build_ego_masks(index: str, out_dir: str, max_clips: int = 40) -> None:
 
 
 def ego_mask(frames: list[Path], cam: str, prebuilt: Path | None = None) -> np.ndarray:
-    """255 = keep. Uses data/teslacam/egomask/<cam>.png (from `tsplat egomask`) when present;
+    """255 = keep. Uses <data>/egomask/<cam>.png (from `otrv egomask`) when present;
     otherwise guesses from this window: pixels that barely change while driving."""
     size = Image.open(frames[0]).size
     if prebuilt and (prebuilt / f"{cam}.png").exists():
@@ -248,21 +250,31 @@ def write_pairs(out: Path, cams: list[str], same_k: int = 5, cross_k: int = 8) -
     return len(pairs)
 
 
+def _yaw_R(deg: float) -> np.ndarray:
+    """Rotation taking a vector from the front-camera frame into a camera yawed by `deg` (right = +)."""
+    th = np.radians(deg)
+    return np.array([[np.cos(th), 0, -np.sin(th)], [0, 1, 0], [np.sin(th), 0, np.cos(th)]])
+
+
 def write_rig_config(out: Path, cams: list[str]) -> None:
+    """COLMAP rig prior. The rig frame is the reference camera's frame (front if present, else the
+    first camera), so offsets in RIG (front-camera frame) are rotated into it before use."""
     ref = "front" if "front" in cams else cams[0]
+    yaw0, pos0 = RIG[ref][0], np.array(RIG[ref][1])
+    R_ref = _yaw_R(yaw0)
     entries = []
     for cam in cams:
         yaw, pos = RIG[cam]
-        yaw0 = RIG[ref][0]
         th = np.radians(yaw - yaw0)
         e = {"image_prefix": f"{cam}/"}
         if cam == ref:
             e["ref_sensor"] = True
         else:
-            # cam_from_rig = Ry(-th); translation = -R @ position
-            R = np.array([[np.cos(th), 0, -np.sin(th)], [0, 1, 0], [np.sin(th), 0, np.cos(th)]])
+            # x_cam = R @ x_rig + t, with the camera centre c (in the rig frame) mapping to 0: t = -R @ c
+            R = _yaw_R(yaw - yaw0)
+            centre = R_ref @ (np.array(pos) - pos0)
             e["cam_from_rig_rotation"] = [float(np.cos(-th / 2)), 0.0, float(np.sin(-th / 2)), 0.0]
-            e["cam_from_rig_translation"] = (-R @ (np.array(pos) - np.array(RIG[ref][1]))).round(4).tolist()
+            e["cam_from_rig_translation"] = (-R @ centre).round(4).tolist()
         entries.append(e)
     (out / "rig_config.json").write_text(json.dumps([{"cameras": entries}], indent=1))
 
@@ -297,32 +309,58 @@ def write_viewer_assets(cams: dict, out: Path, start: float, dur: float) -> None
         )
 
     rows = sei.extract(cams["front"]) if "front" in cams else []
-    tel = []
-    if rows:
-        fps = video_fps(cams["front"])
-        seq0 = rows[0]["frame_seq_no"]
-        last = -1.0
-        for r in rows:
-            t = (r["frame_seq_no"] - seq0) / fps - start
-            if 0 <= t <= dur and t - last >= 0.1:
-                last = t
-                tel.append(
-                    {
-                        "t": round(t, 2),
-                        "mph": round(r.get("vehicle_speed_mps", 0) * 2.23694, 1),
-                        "lat": r.get("latitude_deg"),
-                        "lon": r.get("longitude_deg"),
-                        "heading": r.get("heading_deg"),
-                        "steer": r.get("steering_wheel_angle"),
-                        "gear": r.get("gear"),
-                        "autopilot": r.get("autopilot"),
-                        "brake": r.get("brake_applied", False),
-                        "blinkL": r.get("blinker_on_left", False),
-                        "blinkR": r.get("blinker_on_right", False),
-                    }
-                )
+    tel = telemetry(rows, video_fps(cams["front"]), start, dur) if rows else []
     (out / "viewer" / "telemetry.json").write_text(json.dumps(tel))
     print(f"telemetry: {len(tel)} samples" if tel else "telemetry: none in this clip (needs fw 2025.44.25+)")
+
+
+def telemetry(rows: list[dict], fps: float, start: float, dur: float, min_dt: float = 0.1) -> list[dict]:
+    """SEI rows (one per video frame) -> window-relative samples at most every `min_dt` seconds.
+    `t` is exact (frame_seq_no / fps), so consumers must integrate over `t`, not assume a sample rate."""
+    tel: list[dict] = []
+    if not rows:
+        return tel
+    seq0 = rows[0]["frame_seq_no"]
+    last = -1.0
+    for r in rows:
+        t = (r["frame_seq_no"] - seq0) / fps - start
+        if 0 <= t <= dur and t - last >= min_dt - 1e-9:
+            last = t
+            tel.append(
+                {
+                    "t": round(t, 3),
+                    "mph": round(r.get("vehicle_speed_mps", 0) * 2.23694, 1),
+                    "lat": r.get("latitude_deg"),
+                    "lon": r.get("longitude_deg"),
+                    "heading": r.get("heading_deg"),
+                    "steer": r.get("steering_wheel_angle"),
+                    "gear": r.get("gear"),
+                    "autopilot": r.get("autopilot"),
+                    "brake": r.get("brake_applied", False),
+                    "blinkL": r.get("blinker_on_left", False),
+                    "blinkR": r.get("blinker_on_right", False),
+                }
+            )
+    return tel
+
+
+def check_window(clip: dict, start: float, dur: float, slack: float = 0.5) -> None:
+    """Fail before doing any work if the requested window doesn't fit inside the clip."""
+    if start < 0 or dur <= 0:
+        raise SystemExit(f"--start must be >= 0 and --dur > 0 (got --start {start:g} --dur {dur:g})")
+    seconds = clip.get("seconds")
+    if not seconds:
+        return  # length unknown (no front camera, or ffprobe failed at ingest)
+    if start >= seconds:
+        raise SystemExit(
+            f"--start {start:g}s is past the end of clip {clip['id']} ({seconds:g}s long). "
+            f"Pick --start between 0 and {max(0, int(seconds) - 1)}."
+        )
+    if start + dur > seconds + slack:
+        raise SystemExit(
+            f"--start {start:g} + --dur {dur:g} = {start + dur:g}s runs past the end of clip {clip['id']} "
+            f"({seconds:g}s long). Use --dur {int(seconds - start)} or an earlier --start."
+        )
 
 
 def run(
@@ -339,26 +377,37 @@ def run(
     clips = json.loads(Path(index).read_text())
     clip = next((c for c in clips if c["id"] == clip_id or c["timestamp"] == clip_id), None)
     if not clip:
-        raise SystemExit(f"clip {clip_id!r} not in {index}; run `tsplat list`")
+        raise SystemExit(f"clip {clip_id!r} not in {index}; run `otrv list` to see clip ids")
+    check_window(clip, start, dur)
     cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
+    # Fresh outputs: a previous prep with a longer window or more cameras must not leak into this one.
+    for stale in (out / "images", out / "masks", out / "viewer" / "cams"):
+        shutil.rmtree(stale, ignore_errors=True)
     print(f"[{name}] {len(cams)} cams, {start}s +{dur}s @ {fps} fps")
     extract_frames(cams, out, start, dur, fps, width)
+    counts = {c: len(list((out / "images" / c).glob("*.jpg"))) for c in cams}
+    if not counts or min(counts.values()) == 0:
+        empty = [c for c, n in counts.items() if n == 0]
+        raise SystemExit(f"ffmpeg extracted no frames for {', '.join(empty) or 'any camera'}; check --start/--dur")
+    actual_dur = round(min(counts.values()) / fps, 3)
     egodir = Path(index).parent / "egomask"
-    print("ego mask: " + ("prebuilt" if egodir.exists() else "guessed from window (run `tsplat egomask` for better)"))
+    print("ego mask: " + ("prebuilt" if egodir.exists() else "guessed from window (run `otrv egomask` for better)"))
     write_masks(out, list(cams), movers, egodir)
     print(f"pairs: {write_pairs(out, list(cams))}")
     write_rig_config(out, list(cams))
-    write_viewer_assets(cams, out, start, dur)
+    write_viewer_assets(cams, out, start, actual_dur)
     (out / "meta.json").write_text(
         json.dumps(
             {
                 "clip": clip["id"],
                 "timestamp": clip["timestamp"],
                 "start": start,
-                "dur": dur,
+                "dur": actual_dur,
+                "requested_dur": dur,
                 "fps": fps,
+                "frames": counts,
                 "cams": list(cams),
             },
             indent=1,

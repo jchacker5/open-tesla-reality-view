@@ -83,6 +83,14 @@ prints the size and your free space, and stops if it won't fit.
 - `prep --mask-movers`: masks moving cars and people with YOLO so they don't leave smears. Needs
   `uv sync --extra movers` first, which downloads PyTorch (~1 GB).
 
+**Render a video.** `otrv render drive1` writes `work/drive1/render.mp4`: a 1080p chase-cam
+flight along your drive, rendered by the viewer in headless Chromium. `--aspect 9:16` makes a
+vertical short, `--aspect 1:1` a square loop, `--cam driver|orbit` changes the camera. Needs
+`uv sync --extra render` and `uv run playwright install chromium`. `--enhance difix` adds an
+optional AI clean-up pass with NVIDIA Difix (about 6 s per frame on an M4; frames are labelled
+"AI-enhanced"). Difix is under NVIDIA's **non-commercial** license, not MIT, so it is a separate
+extra and asks you to accept its terms first. See [docs/RENDER.md](docs/RENDER.md).
+
 **Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight
 (`otrv suggest` finds these from telemetry). Highways, night and parked clips reconstruct poorly.
 `--fps 4` helps for slow driving. `recon --steps 30000` gives the best quality, and `recon --live`
@@ -120,6 +128,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `prep` | sample frames, mask the car (and optionally moving objects), write a rig-aware match list (same camera over time + overlapping neighbours) and the approximate rig, decode telemetry, cut the side-panel clips |
 | `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
 | `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
+| `render` | drive the viewer's render mode in headless Chromium, capture splat and overlay layers per frame, optionally clean up with Difix and stabilise, composite, encode H.264; see [docs/RENDER.md](docs/RENDER.md) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
 
@@ -140,7 +149,8 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 - [ ] Linux + CUDA training backend ([gsplat](https://github.com/nerfstudio-project/gsplat))
 - [ ] Generative clean-up pass with ViewNeXt once its weights are public
 - [ ] Multi-clip stitching for longer drives
-- [ ] Export: share-able web build, video render of a camera path
+- [x] Video render of a camera path (`otrv render`)
+- [ ] Export: share-able web build
 - [ ] Windows support
 
 Want one of these? Comment on its issue or open a draft PR. See [CONTRIBUTING.md](CONTRIBUTING.md).

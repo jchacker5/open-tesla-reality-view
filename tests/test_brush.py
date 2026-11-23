@@ -134,3 +134,72 @@ def test_setup_on_intel_mac_explains(monkeypatch, tmp_path):
     monkeypatch.setattr(brush.platform, "machine", lambda: "x86_64")
     with pytest.raises(SystemExit, match="no Intel-Mac build"):
         brush.setup(tmp_path, fetch=lambda u, o: pytest.fail("must not download"))
+
+
+# ---- setup-brush --from-source and the flag adapter --------------------------------------------------
+
+
+def test_from_source_without_cargo_explains_and_runs_nothing(tmp_path):
+    ran = []
+    with pytest.raises(SystemExit, match="rustup.rs"):
+        brush.setup_from_source(tmp_path, run=lambda *a, **k: ran.append(a), which=lambda name: None)
+    assert ran == [] and not (tmp_path / "src").exists()
+
+
+class FakeRun:
+    """Records commands; `rev-parse` answers with `head`; `cargo build` drops a fake binary."""
+
+    def __init__(self, install_dir, head=brush.SOURCE_COMMIT):
+        self.cmds, self.install_dir, self.head = [], install_dir, head
+
+    def __call__(self, cmd, check=False, capture_output=False, text=False, cwd=None):
+        self.cmds.append((cmd, cwd))
+        if "init" in cmd:
+            (brush.source_dir(self.install_dir) / ".git").mkdir()
+        if cmd[:2] == ["cargo", "build"]:
+            exe = brush.source_exe(self.install_dir)
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+        return type("R", (), {"stdout": self.head + "\n", "returncode": 0})()
+
+
+def test_from_source_fetches_the_pinned_commit_and_builds_brush_app(tmp_path):
+    run = FakeRun(tmp_path)
+    exe = brush.setup_from_source(tmp_path, run=run, which=lambda name: f"/usr/bin/{name}")
+    assert exe == brush.source_exe(tmp_path) and exe.name in ("brush", "brush.exe")
+    flat = [" ".join(c) for c, _ in run.cmds]
+    assert any(f"fetch -q --depth 1 origin {brush.SOURCE_COMMIT}" in c for c in flat)
+    assert any(c.endswith("checkout -q --force --detach FETCH_HEAD") for c in flat)
+    build = [(c, cwd) for c, cwd in run.cmds if c[0] == "cargo"]
+    assert build == [(["cargo", "build", "--release", "-p", "brush-app"], brush.source_dir(tmp_path))]
+    assert len(brush.SOURCE_COMMIT) == 40  # a full SHA, not a branch name
+
+
+def test_from_source_refuses_a_different_commit(tmp_path):
+    run = FakeRun(tmp_path, head="0" * 40)
+    with pytest.raises(SystemExit, match="refusing to build"):
+        brush.setup_from_source(tmp_path, run=run, which=lambda name: name)
+    assert not any(c[0] == "cargo" for c, _ in run.cmds)
+
+
+V030 = {"--total-steps", "--export-every", "--opac-loss-weight", "--max-splats", "--seed", "--eval-save-to-disk"}
+MAIN = {"--total-train-iters", "--export-every", "--opac-decay", "--max-splats", "--seed", "--eval-save-to-disk"}
+ARGS = ["/b", "data", "--total-steps", "100", "--opac-loss-weight", "1e-09", "--eval-save-to-disk", "--seed", "4"]
+
+
+def test_adapt_args_keeps_v030_and_translates_for_main():
+    assert brush.adapt_args(ARGS, V030) == (ARGS, [])
+    assert brush.adapt_args(ARGS, None) == (ARGS, [])
+    out, dropped = brush.adapt_args(ARGS, MAIN)
+    assert out == ["/b", "data", "--total-train-iters", "100", "--eval-save-to-disk", "--seed", "4"]
+    assert dropped == ["--opac-loss-weight"]
+
+
+def test_cli_flags_reads_brush_help_only(tmp_path):
+    exe = tmp_path / "brush"
+    exe.write_text("#!/bin/sh\necho '      --total-train-iters <N>'\necho '      --max-splats <N>'\n")
+    exe.chmod(0o755)
+    assert brush.cli_flags(str(exe)) == {"--total-train-iters", "--max-splats"}
+    exe.write_text("#!/bin/sh\necho 'usage: something --else'\n")
+    assert brush.cli_flags(str(exe)) is None  # not a Brush help page: pass flags through
+    assert brush.cli_flags(str(tmp_path / "missing")) is None

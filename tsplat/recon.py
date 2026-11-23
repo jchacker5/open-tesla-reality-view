@@ -255,6 +255,9 @@ def train(
         args.append("--with-viewer")
     if eval_every:
         args += ["--eval-split-every", str(eval_every), "--eval-every", str(steps), "--eval-save-to-disk"]
+    args, dropped = brush.adapt_args(args, brush.cli_flags(args[0]))  # v0.3.0 flags -> this Brush's
+    if dropped:
+        print(f"note: this Brush has no {', '.join(dropped)}; training without them")
     sh(*args)
     final = out / f"splat_{steps}.ply"
     if not final.exists():

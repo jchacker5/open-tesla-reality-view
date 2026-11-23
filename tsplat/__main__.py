@@ -170,6 +170,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = cmd("setup-brush", f"download Brush v{brush.VERSION} for this platform, verify its sha256, install it")
     a.add_argument("--dir", default=str(brush.INSTALL_DIR), help="install directory")
+    a.add_argument(
+        "--from-source",
+        action="store_true",
+        help=f"instead, build Brush main at the pinned commit {brush.SOURCE_COMMIT[:12]} (needle-splat fix, "
+        "mip filter, fisheye) with cargo into <dir>/src: 10-20 min and a few GB; v0.3.0 stays the default "
+        "until you set BRUSH",
+    )
 
     a = cmd("ingest", "copy TeslaCam footage off the USB drive into the data dir and index it", data=True)
     a.add_argument(
@@ -491,6 +498,14 @@ def cmd_view(args) -> None:
 
 
 def cmd_setup_brush(args) -> None:
+    if args.from_source:
+        exe = brush.setup_from_source(Path(args.dir).expanduser())
+        print(
+            f"Brush main ({brush.SOURCE_COMMIT[:12]}) built: {exe}\n"
+            f"recon keeps using {brush.path()} until you opt in:\n  export BRUSH='{exe}'\n"
+            "(bench cards record the Brush version, so A/B it against v0.3.0 with the same run)"
+        )
+        return
     exe = brush.setup(Path(args.dir).expanduser())
     print(f"Brush installed: {exe}")
     if exe != brush.default_path() and os.environ.get("BRUSH") != str(exe):

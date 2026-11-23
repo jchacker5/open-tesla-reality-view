@@ -4,7 +4,8 @@ Difix (github.com/nv-tlabs/Difix3D) is a single-step diffusion model that remove
 artifacts. It is NOT part of this MIT project: its weights (Hugging Face nvidia/difix, nvidia/difix_ref)
 are under the NVIDIA License (non-commercial research and evaluation only) and build on SD-Turbo
 (Stability AI Community License). Nothing NVIDIA wrote is vendored here: the pipeline class is
-downloaded at runtime from a pinned commit, checked against a SHA-256, then imported.
+downloaded at runtime from a pinned commit, checked against a SHA-256, then imported; the model repos
+are loaded at pinned revisions, and the remote code in them is SHA-256 checked before diffusers runs it.
 
 Heavy dependencies (torch, diffusers, opencv) live in the `enhance` extra and are imported lazily,
 so the rest of this module (license gate, reference selection, stabilisation math) works without them.
@@ -29,6 +30,26 @@ MODEL = {"difix": "nvidia/difix", "difix-ref": "nvidia/difix_ref"}
 # Measured on an M4 (fp16, MPS) at 1024 px wide; used for the up-front ETA.
 SECONDS_PER_FRAME = {"difix": 6.3, "difix-ref": 40.0}
 
+# Every piece of remote code is pinned. The model repos are loaded at a fixed commit, and the Python files
+# in them that diffusers imports (trust_remote_code: custom VAE/UNet classes), plus model_index.json, which
+# decides which of those files get imported, are SHA-256 checked after download and before any import.
+REVISION = {
+    "difix": "2b0c6fb5797c26b01154dfdeb19d36e5e2eaf388",
+    "difix-ref": "d4830559772a5795c9d136302c5b197d6418d3fb",
+}
+_VAE_PY = "a0c16e2fe489d0386b04274b25e6cec212f37264283f8ce1c042270d27250edf"
+REMOTE_CODE = {
+    "difix": {
+        "model_index.json": "0b4316574ae102b3855c4508a13becc81b353f6455dafa6186ac37d82c8292b9",
+        "vae/autoencoder_kl.py": _VAE_PY,
+    },
+    "difix-ref": {
+        "model_index.json": "06c73e4d1c483e1c81fd0b2f8a89f021f5b31f244c217ff7d62d28f6d37cc1e1",
+        "vae/autoencoder_kl.py": _VAE_PY,
+        "unet/unet_2d_condition.py": "d2acb23ac4d0bd164311b6622006c7184cf5e3469086cb255cfa8b32e6a184b5",
+    },
+}
+
 PIPELINE_COMMIT = "1edb0f70de735becaecb1cbe68b7d22eb3c31170"
 PIPELINE_URL = f"https://raw.githubusercontent.com/nv-tlabs/Difix3D/{PIPELINE_COMMIT}/src/pipeline_difix.py"
 PIPELINE_SHA256 = "2f73e2708b3f9ce560800163554f869e5e43e3a42049f67da3609f7736cbab3a"
@@ -44,7 +65,8 @@ LICENSE_NOTICE = """\
   * Difix is fine-tuned from SD-Turbo: Stability AI Community License.
     https://huggingface.co/stabilityai/sd-turbo
 On first use this downloads ~2.5 GB of weights from Hugging Face and NVIDIA's pipeline file
-from GitHub (pinned commit, SHA-256 checked). Videos made with it inherit these terms:
+from GitHub (pinned commit, SHA-256 checked; the model repos are pinned too and their code is
+SHA-256 checked before it runs). Videos made with it inherit these terms:
 don't use them commercially. Frames are labelled "AI-enhanced" unless you pass --no-label.
 To accept, pass --accept-nvidia-license or set OTRV_ACCEPT_NVIDIA_LICENSE=1.
 ------------------------------------------------------------------------------------------"""
@@ -111,6 +133,34 @@ def fetch_pipeline(cache_dir: Path = CACHE_DIR, url: str = PIPELINE_URL, digest:
     return dest
 
 
+def verify_remote_code(mode: str, download: Callable[..., str] | None = None) -> dict[str, Path]:
+    """Download the model repo's remote code files at the pinned revision (into the Hugging Face cache,
+    where from_pretrained finds them) and check each SHA-256. Refuses (SystemExit) on any mismatch, so
+    nothing unverified is ever imported. `download` is huggingface_hub.hf_hub_download (injectable)."""
+    if download is None:
+        from huggingface_hub import hf_hub_download as download
+    repo, rev = MODEL[mode], REVISION[mode]
+    out = {}
+    for name, digest in REMOTE_CODE[mode].items():
+        path = Path(download(repo_id=repo, filename=name, revision=rev))
+        got = sha256(path)
+        if got != digest:
+            raise SystemExit(
+                f"{repo}@{rev[:7]}: {name} has SHA-256 {got}, expected {digest}. "
+                "Refusing to load remote code that doesn't match the pinned file."
+            )
+        out[name] = path
+    return out
+
+
+def load_pipeline(Pipeline, mode: str, dtype, download: Callable[..., str] | None = None):
+    """from_pretrained at the pinned revision, after the remote code it will execute has been verified."""
+    verify_remote_code(mode, download)
+    # trust_remote_code: the model repos ship their own unet/vae classes (difix_ref needs them); they are
+    # the files verified above, at the same revision.
+    return Pipeline.from_pretrained(MODEL[mode], revision=REVISION[mode], trust_remote_code=True, torch_dtype=dtype)
+
+
 def _import_pipeline(path: Path):
     spec = importlib.util.spec_from_file_location("otrv_pipeline_difix", path)
     mod = importlib.util.module_from_spec(spec)
@@ -147,8 +197,7 @@ class Difix:
             self.device, dtype = "cpu", torch.float32
         Pipeline = _import_pipeline(fetch_pipeline())
         t0 = time.perf_counter()
-        # trust_remote_code: the model repos ship their own unet/vae classes (difix_ref needs them).
-        self.pipe = Pipeline.from_pretrained(MODEL[mode], trust_remote_code=True, torch_dtype=dtype).to(self.device)
+        self.pipe = load_pipeline(Pipeline, mode, dtype).to(self.device)
         self.pipe.set_progress_bar_config(disable=True)
         print(f"loaded {MODEL[mode]} on {self.device} ({dtype}) in {time.perf_counter() - t0:.0f} s")
 

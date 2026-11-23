@@ -119,8 +119,11 @@ from NVIDIA is vendored in this repository. On first use, after you accept, `otr
 
 - downloads `src/pipeline_difix.py` from Difix3D at a pinned commit into `~/.cache/otrv/difix/`,
   checks its SHA-256 and only then imports it;
-- downloads the model weights from Hugging Face into its usual cache (~2.5 GB per model). The
-  model repos contain custom UNet/VAE code, which diffusers loads with `trust_remote_code`.
+- downloads the model weights from Hugging Face into its usual cache (~2.5 GB per model), at a
+  pinned commit (`enhance.REVISION`). The model repos contain custom UNet/VAE code, which diffusers
+  loads with `trust_remote_code`; those `.py` files (and `model_index.json`, which names them) are
+  fetched at the same commit and checked against the SHA-256s in `enhance.REMOTE_CODE` first. Any
+  mismatch stops the run before anything is imported.
 
 `otrv render --enhance …` refuses to start (and downloads nothing) until you accept, with
 `--accept-nvidia-license` on the command line or `OTRV_ACCEPT_NVIDIA_LICENSE=1` in the environment.

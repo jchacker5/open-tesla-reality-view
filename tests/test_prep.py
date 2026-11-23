@@ -64,6 +64,18 @@ def test_write_pairs_same_camera_window(tmp_path):
     ]
 
 
+def test_write_pairs_windows_scale_with_fps(tmp_path):
+    """At 6 fps the windows are twice as many frames, so they cover the same time as at 3 fps."""
+    fake_images(tmp_path, ["front", "left_pillar"], 30)
+    prep.write_pairs(tmp_path, ["front", "left_pillar"], fps=6)
+    pairs = read_pairs(tmp_path)
+    same = {int(b[-9:-4]) for a, b in pairs if a == "front/00000.jpg" and b.startswith("front/")}
+    cross = {int(b[-9:-4]) for a, b in pairs if a == "front/00010.jpg" and b.startswith("left_pillar/")}
+    cross |= {int(a[-9:-4]) for a, b in pairs if b == "front/00010.jpg" and a.startswith("left_pillar/")}
+    assert same == set(range(1, 11))  # same_k 5 -> 10
+    assert cross == set(range(10 - 16, 10 + 17)) & set(range(30))  # cross_k 8 -> 16
+
+
 @pytest.mark.parametrize("cams", [CAMS, FOUR], ids=["6cam", "4cam"])
 def test_write_rig_config(tmp_path, cams):
     prep.write_rig_config(tmp_path, cams)

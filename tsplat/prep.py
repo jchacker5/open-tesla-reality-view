@@ -1,11 +1,11 @@
 """Turn one 4- or 6-camera clip window into a COLMAP-ready dataset + viewer assets.
 
 work/<name>/
-  images/<cam>/00000.jpg          frames sampled at --fps from every camera
+  images/<cam>/00000.jpg          frames sampled at --fps (default 6) from every camera
   masks/<cam>/00000.jpg.png  COLMAP masks (black = ignore): ego-car body (+ movers if requested)
   sky/<cam>/00000.jpg.png    sky masks (white = sky; see sky.py), sky.json: sky colours for the viewer
   rig_config.json            approximate Tesla camera layout, refined by COLMAP bundle adjustment
-  pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours)
+  pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours; windows scale with fps)
   viewer/cams/<cam>.mp4      trimmed, downscaled clips for the side panel
   viewer/telemetry.json      SEI speed/GPS/steering at ~10 Hz (if the clip has it)
   meta.json                  clip id, window (dur = frames actually extracted / fps), cameras
@@ -228,7 +228,12 @@ def write_masks(out: Path, cams: list[str], movers: bool, prebuilt: Path | None)
             Image.fromarray(m).save(md / f"{f.name}.png")
 
 
-def write_pairs(out: Path, cams: list[str], same_k: int = 5, cross_k: int = 8) -> int:
+def write_pairs(out: Path, cams: list[str], same_k: int = 5, cross_k: int = 8, fps: float = 3.0) -> int:
+    """Match list: each frame with the next `same_k` frames of its camera and the neighbouring cameras'
+    frames within `cross_k`. The windows are tuned at 3 fps and scaled by fps / 3, so they span the
+    same time (and road distance) at any --fps."""
+    same_k = max(1, round(same_k * fps / 3))
+    cross_k = max(1, round(cross_k * fps / 3))
     nbrs = neighbours(cams)
     if not ({"left_pillar", "right_pillar"} & set(cams)):
         cross_k *= 2
@@ -451,7 +456,7 @@ def run(
     print(ego_mask_summary(egodir, list(cams)))
     write_masks(out, list(cams), movers, egodir)
     sky.write(out, list(cams), sky_model)
-    print(f"pairs: {write_pairs(out, list(cams))}")
+    print(f"pairs: {write_pairs(out, list(cams), fps=fps)}")
     write_rig_config(out, list(cams))
     write_viewer_assets(cams, out, start, actual_dur)
     (out / "meta.json").write_text(

@@ -62,6 +62,15 @@ def _kinds(value: str) -> tuple[str, ...]:
     return kinds
 
 
+LPIPS_LOSS_WEIGHT = 0.05  # Brush's default is 0 (off); perceptual loss sharpens texture (bench: lpips, road)
+
+
+def default_max_splats() -> int:
+    """Brush's splat cap: 3M on a 16 GB Mac (the trainer + macOS fit), 6M with more RAM (Brush's own is 10M)."""
+    gb = doctor.ram_gb()
+    return 6_000_000 if gb is not None and gb > 16.5 else 3_000_000
+
+
 OPAC_LOSS_WEIGHT = 1e-9  # Brush default; 1e-7 is the first A/B (docs/HILL_CLIMB.md), 1e-6 collapsed the smoke scene
 SCALE_LOSS_WEIGHT = 1e-8  # Brush's default, passed explicitly so it's recorded and A/B-able
 
@@ -199,7 +208,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--start", type=float, default=0, help="window start, in seconds into the clip")
     a.add_argument("--dur", type=float, default=20, help="window length in seconds (recon time grows with it)")
     a.add_argument(
-        "--fps", type=float, default=3, help="frames per second sampled from each camera (20 s x 3 fps x 4 cams = 240)"
+        "--fps",
+        type=float,
+        default=6,
+        help="frames per second sampled from each camera (20 s x 6 fps x 4 cams = 480); SfM time grows with it",
     )
     a.add_argument("--width", type=int, default=1280, help="max frame width in pixels for reconstruction")
     a.add_argument(
@@ -247,6 +259,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=SCALE_LOSS_WEIGHT,
         help="Brush scale regulariser (Brush's own default 1e-8): higher discourages huge splats",
+    )
+    a.add_argument(
+        "--max-splats",
+        type=int,
+        default=default_max_splats(),
+        help="Brush's cap on the number of splats (default: 3M with 16 GB RAM or less, else 6M; Brush's own is 10M)",
+    )
+    a.add_argument(
+        "--lpips-loss-weight",
+        type=float,
+        default=LPIPS_LOSS_WEIGHT,
+        help="Brush perceptual (LPIPS) loss weight; Brush's own default is 0 (off)",
     )
     add_clean_args(a)
     a.add_argument(
@@ -399,6 +423,10 @@ def cmd_recon(args) -> None:
         f"{args.opac_loss_weight:g}",
         "--scale-loss-weight",
         f"{args.scale_loss_weight:g}",
+        "--max-splats",
+        str(args.max_splats),
+        "--lpips-loss-weight",
+        f"{args.lpips_loss_weight:g}",
     ]
     rules = clean_rules(args, args.sky)
     recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, brush_args, rules)
@@ -414,6 +442,8 @@ def cmd_recon(args) -> None:
                 "seed": args.seed,
                 "opac_loss_weight": args.opac_loss_weight,
                 "scale_loss_weight": args.scale_loss_weight,
+                "max_splats": args.max_splats,
+                "lpips_loss_weight": args.lpips_loss_weight,
                 "sky": args.sky,
                 "dense_init": args.dense_init,
                 "color_norm": args.color_norm,

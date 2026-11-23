@@ -61,3 +61,24 @@ def test_every_recon_flag_is_recorded_in_recon_args(stubbed):
     assert rec["color_norm"] is True and rec["dense_init"] is True and "clean" in rec
     assert calls["color_norm"] and calls["dense_init"] and calls["sky"] == "alpha"
     assert calls["train"]["eval_every"] == 8
+
+
+def test_recon_args_reach_brush(stubbed):
+    work, calls = stubbed
+    cli.main(["recon", "r", "--seed", "3", "--max-splats", "1234", "--lpips-loss-weight", "0.1"])
+    extra = calls["train"]["extra"]
+    pairs = dict(zip(extra[::2], extra[1::2], strict=False))
+    assert pairs["--seed"] == "3" and pairs["--max-splats"] == "1234" and pairs["--lpips-loss-weight"] == "0.1"
+    assert "--opac-loss-weight" in pairs and "--scale-loss-weight" in pairs
+    rec = json.loads((work / "recon_args.json").read_text())
+    assert rec["max_splats"] == 1234 and rec["lpips_loss_weight"] == 0.1
+    assert "color_norm" not in calls  # off by default
+
+
+def test_max_splats_default_follows_ram(monkeypatch):
+    monkeypatch.setattr(cli.doctor, "ram_gb", lambda: 16.0)
+    assert cli.default_max_splats() == 3_000_000
+    monkeypatch.setattr(cli.doctor, "ram_gb", lambda: 24.0)
+    assert cli.default_max_splats() == 6_000_000
+    monkeypatch.setattr(cli.doctor, "ram_gb", lambda: None)
+    assert cli.default_max_splats() == 3_000_000

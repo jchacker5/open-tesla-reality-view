@@ -88,6 +88,26 @@ prints the size and your free space, and stops if it won't fit.
 `--fps 4` helps for slow driving. `recon --steps 30000` gives the best quality, and `recon --live`
 opens Brush's live training window.
 
+### Studio (web app)
+
+Prefer clicking to typing? `otrv studio` runs the same steps as a local web app:
+
+```sh
+uv sync --extra studio
+uv run otrv studio        # opens http://127.0.0.1:8770/?token=...
+```
+
+Pick your footage (it finds a plugged-in TeslaCam drive, or you choose a folder). Your drives appear
+with thumbnails, speed and route. Drag a 20-60 s window over the speed strip, or take a suggested one,
+and press **Build**. The stepper (frames → masks → features → match → map → undistort → train →
+export) shows live progress and an ETA, and builds can be cancelled and resumed. Finished cities go
+to the **Gallery**, where you can **Drive** them or **Replay** them.
+
+Everything stays on your Mac. The server listens on 127.0.0.1 only and needs the token in the URL it
+prints. Footage is read in place, and only the clip you build is copied. The studio's pages make no
+external requests (the replay viewer still loads three.js/Spark from a CDN). See
+[docs/STUDIO.md](docs/STUDIO.md).
+
 ### Costs
 
 | Step | Cost |
@@ -121,6 +141,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
 | `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
+| `studio` | local web app over all of the above: sources, drives, window picking, a build queue with live progress, gallery ([docs/STUDIO.md](docs/STUDIO.md)) |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
 
 ## Requirements

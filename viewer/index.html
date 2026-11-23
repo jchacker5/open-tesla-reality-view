@@ -42,11 +42,18 @@
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .time { font: 11px var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; }
   .loading { position: absolute; inset: 0; pointer-events: none; display: grid; place-items: center; color: var(--dim); font: 12px var(--mono); }
+  /* ?clean=1: no timestamp and no dashcam side panel (for public recordings) */
+  body.clean aside, body.clean .meta { display: none; }
+  body.clean .app { grid-template-columns: 1fr; }
   @media (max-width: 820px) {
     body { overflow: auto; }
     .app { grid-template-columns: 1fr; grid-template-rows: 60vh auto; height: auto; padding: 16px; }
     .stage { order: -1; height: 60vh; }
     .speed { font-size: 44px; }
+  }
+  @media (max-width: 820px) {
+    body.clean .app { grid-template-rows: calc(100svh - 32px); }
+    body.clean .stage { height: calc(100svh - 32px); }
   }
   @media (max-width: 560px) {
     .bar { grid-template-columns: auto auto; justify-content: space-between; row-gap: 8px; bottom: 12px; padding: 8px 10px; }
@@ -101,6 +108,7 @@ import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
+if (new URLSearchParams(location.search).get("clean") === "1") document.body.classList.add("clean");
 const [path, tel] = await Promise.all([
   fetch("path.json").then((r) => r.json()),
   fetch("telemetry.json").then((r) => r.json()).catch(() => []),

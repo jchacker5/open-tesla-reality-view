@@ -63,6 +63,15 @@ uv run otrv recon drive1                 # SfM + splat training: the slow step (
 uv run otrv view drive1                  # opens the replay in your browser
 ```
 
+**Higher fidelity (pipeline v2).** `prep` samples 6 fps by default, and `recon` trains with a
+perceptual (LPIPS) loss, a transparent sky, and prunes and dehazes the splat afterwards. Optional
+levers: `recon --color-norm` (match every camera's colour to the front camera), `recon --dense-init`
+(Depth Anything V2 points plus a road ribbon; needs `uv sync --extra quality`), and
+`otrv setup-brush --from-source` (builds Brush's main branch, with its needle-splat fix and mip
+filter, if you have Rust's cargo). Every flag, its default and the order to A/B them are in
+[docs/HILL_CLIMB.md](docs/HILL_CLIMB.md). `recon` also bakes `viewer/collision.json` (ground height
+and distance-to-wall grids) for the viewer's drive mode; `otrv collision drive1` re-bakes it.
+
 Every command has `--help` with defaults, units and time costs. `ingest`, `prep` and `recon` run a
 quick `doctor` check first and stop with the fix if a tool is missing; errors print one line
 (add `--debug` for the traceback).
@@ -85,7 +94,7 @@ prints the size and your free space, and stops if it won't fit.
 
 **Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight
 (`otrv suggest` finds these from telemetry). Highways, night and parked clips reconstruct poorly.
-`--fps 4` helps for slow driving. `recon --steps 30000` gives the best quality, and `recon --live`
+The default 6 fps gives SfM more overlap; `--fps 3` is the faster v1 setting. `recon --steps 30000` gives the best quality, and `recon --live`
 opens Brush's live training window.
 
 ### Costs
@@ -94,8 +103,9 @@ opens Brush's live training window.
 |---|---|
 | `ingest` | Disk: whatever you copy. A full hour of RecentClips from 4-6 cameras is several GB; ingest prints the exact size first. Narrow it with `--since` / `--kinds`. |
 | `uv sync --extra movers` | ~1 GB download (PyTorch + ultralytics). Only needed for `--mask-movers`. |
-| `prep` (20 s at 3 fps) | ~1-2 min. 240 images on a 4-camera car, 360 on a 6-camera car. |
-| `recon` (20 s at 3 fps, 4 cameras = 240 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB**. Time scales roughly with `--steps`, so the default 15000 should take about half that; COLMAP adds a few minutes. |
+| `prep` (20 s at 6 fps) | ~1-2 min. 480 images on a 4-camera car, 720 on a 6-camera car. |
+| `recon` (20 s at 6 fps, 4 cameras = 480 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB** (240 images at 3 fps). Time scales roughly with `--steps`, so the default 15000 should take about half that. COLMAP takes ~3x longer at 6 fps than at 3 fps (4x the image pairs): a few minutes becomes 10-15. |
+| `setup-brush --from-source` | Optional. Rust's cargo; ~10-20 min and a few GB of disk for the first build. |
 | `work/<name>/` | A few GB per run (frames, masks, dense model, splat checkpoints). |
 
 ## How it works
@@ -113,12 +123,13 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | Step | What happens |
 |---|---|
 | `doctor` | check OS, ffmpeg, COLMAP 4.0+ (with `rig_configurator`), Brush 0.3.x, disk and RAM; print fixes |
-| `setup-brush` | download the Brush v0.3.0 release for your platform, verify its published sha256, install it |
+| `setup-brush` | download the Brush v0.3.0 release for your platform, verify its published sha256, install it (`--from-source`: build Brush main at a pinned commit with cargo) |
 | `ingest` | rsync the chosen `TeslaCam` folders, group per-camera files into clips, read each clip's mean speed from its telemetry |
 | `list` / `suggest` | show clips with speed; rank 20 s windows by sustained 10-40 mph and print `prep` commands |
 | `egomask` | optional: find pixels that look identical across many different drives: that's your car's body |
 | `prep` | sample frames, mask the car (and optionally moving objects), write a rig-aware match list (same camera over time + overlapping neighbours) and the approximate rig, decode telemetry, cut the side-panel clips |
-| `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
+| `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → prune/dehaze → drive-mode collision grids, plus the trajectory with real-world scale from telemetry speed |
+| `clean` / `collision` | re-run the post-train clean-up or the collision bake without retraining |
 | `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |

@@ -21,8 +21,16 @@ uv run otrv bench drive1 --note "fps 3 -> 4"
 - per-camera registration;
 - sparse reprojection error;
 - masked held-out PSNR per camera (only for runs trained with `--eval`, from that run's final step);
+- masked held-out LPIPS (needs `uv sync --extra quality`), and PSNR/LPIPS on the near-road band
+  (bottom 35% of each view);
+- floaters: splats inside the ego swept tube, before and after clean-up;
+- haze: share of opacity in translucent splats, and what each clean-up rule removed;
 - stage timings;
-- the full config, plus the machine, COLMAP and Brush versions and the git SHA.
+- the full config (every `prep` and `recon` flag), plus the machine, COLMAP and Brush versions and
+  the git SHA. Brush trains with a fixed `--seed`, so two runs differ by the lever, not the dice.
+
+Held-out PSNR/LPIPS come from Brush's eval renders, made before the post-train clean-up, so the
+clean-up levers (`--prune`, `--dehaze`, `otrv clean`) show up in floaters and haze, not PSNR.
 
 Every bench appends a line, even for a broken run (say SfM failed and there is no `dense/`): each
 metric that couldn't be computed is recorded under `errors` and counts as a gate failure.
@@ -37,7 +45,7 @@ metric that couldn't be computed is recorded under `errors` and counts as a gate
 | Lever | Where | Notes |
 |---|---|---|
 | Window choice | `prep --start --dur` | Steady 10-40 mph past textured scenery matters more than anything else |
-| Frame rate | `prep --fps` | More overlap for slow driving; costs SfM time roughly quadratically in pairs |
+| Frame rate | `prep --fps` (default 6) | More overlap; match windows scale with fps, so pairs grow ~4x from 3 to 6 fps |
 | Rig prior | `recon` (default) vs `--no-rig` | The rig keeps all cameras in one model; check per-camera registration |
 | Mapper | `--global-mapper` | Faster on long windows; compare registration |
 | Masks | `egomask`, `prep --mask-movers` | Removes ghosts. Watch PSNR on the repeaters and back |
@@ -50,3 +58,90 @@ metric that couldn't be computed is recorded under `errors` and counts as a gate
 Share your best card (it's in `work/<name>/metrics.json`, and `otrv bench` prints it) in the
 [Discussions](https://github.com/jchacker5/open-tesla-reality-view/discussions) "Results" category,
 with chip/RAM and car (HW3/HW4). Don't attach footage.
+
+## Pipeline v2 flags
+
+Defaults are what `otrv prep` / `otrv recon` do with no flags. All of them land in
+`recon_args.json` / `meta.json` and so on the bench card's config line.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `prep --fps` | 6 (was 3) | Frames per second per camera. SfM runs on every frame (see below) |
+| `prep --sky-model` | off | UperNet/ADE20K sky masks instead of the brightness heuristic (`--extra quality`) |
+| `recon --seed` | 42 | Brush seed, fixed so A/B runs differ by the lever |
+| `recon --max-splats` | 3,000,000 with <=16 GB RAM, else 6,000,000 | Brush's splat cap (Brush's own: 10M) |
+| `recon --lpips-loss-weight` | 0.05 | Brush perceptual loss (Brush's own: 0) |
+| `recon --opac-loss-weight` | 1e-9 | Brush opacity regulariser (v0.3.0 only; Brush main has none) |
+| `recon --scale-loss-weight` | 1e-8 | Brush scale regulariser (v0.3.0 only) |
+| `recon --sky` | `alpha` | `alpha`: sky transparent in training; `ignore`: masked out; `off`: trained like the rest |
+| `recon --dense-init` | off | Depth Anything V2 Small points fitted to SfM, plus a road ribbon, as Brush's init (`--extra quality`) |
+| `recon --color-norm` | off | LAB mean/std match of every camera to the front camera over a 4 s window |
+| `recon --prune` | on | Drop splats in the ego swept tube and giant faint ones |
+| `recon --dehaze` | on | Drop near-invisible, large translucent and needle splats and far ground fog |
+| `--min-opacity` | 0.04 | dehaze threshold |
+| `--translucent-scale` / `--translucent-opacity` | 0.8 m / 0.35 | dehaze: large and translucent |
+| `--needle-ratio` / `--needle-opacity` | 25 / 0.5 | dehaze: needles |
+| `--ground-fog-m` | 40 m | dehaze: ground-level splats this far from the path |
+| `--dehaze-sky` (`--sky-fog-m`, `-saturation`, `-brightness`) | off (60 m, 0.15, 0.6) | dehaze: sky painted at a finite depth; skipped with `--sky alpha` |
+| `setup-brush --from-source` | off (v0.3.0) | Build Brush main at a pinned commit; opt in with `BRUSH=~/.local/opt/brush/src/target/release/brush` |
+
+`otrv clean <name>` re-runs prune/dehaze with other thresholds on the trained splat, no retraining.
+`recon` (and `clean`) end by baking `viewer/collision.json` for drive mode (`otrv collision <name>`);
+the format is documented in `tsplat/collision.py`.
+
+### SfM cost of 6 fps
+
+COLMAP's rig mapper runs on every frame. The alternative, SfM at 3 fps and then registering the
+other frames with `image_registrator` + `bundle_adjuster`, wasn't needed: the full rig SfM at 6 fps
+costs ~3x the 3 fps SfM (below), and it keeps the rig constraint (a COLMAP 4 frame is all cameras at
+one instant) on every frame instead of registering images one at a time. The match windows
+(same camera: 5 frames, neighbouring cameras: +-8 frames at 3 fps) are scaled by fps/3 so they cover
+the same time, which makes ~4x the pairs at 6 fps.
+
+Measured on the low-resolution smoke clip (6 cameras, 20 s, M4 32 GB, CPU SIFT):
+
+| | 3 fps | 6 fps |
+|---|---|---|
+| images / pairs | 360 / 7,398 | 720 / 28,998 |
+| features | 0.09 min | 0.15 min |
+| matching | 0.39 min | 1.41 min |
+| mapper | 0.84 min | 2.43 min |
+| SfM total | ~1.3 min | ~4.0 min (3x) |
+
+Real 1280-wide footage has more features per image, so expect "a few minutes" at 3 fps to become
+10-15 at 6 fps: still small next to ~75 min of training at 30k steps. If it isn't, `--fps 4` is the
+middle ground.
+
+### Brush from source
+
+`otrv setup-brush --from-source` needs Rust's cargo (https://rustup.rs) and builds brush-app at the
+pinned main commit (in `tsplat/brush.py`) into `~/.local/opt/brush/src`. Brush main renamed
+`--total-steps` to `--total-train-iters` and replaced the opacity/scale loss weights with its own
+regularisers; `recon` reads the installed Brush's `--help` and translates or drops (with a note) the
+flags it passes, so the same command works on both. The card's header shows which Brush ran.
+
+## Suggested A/B order (real footage)
+
+One window, `--eval`, 30k steps, ~75 min per run on the 16 GB Mac mini. Start from a v1-equivalent
+control and add one lever at a time, keeping it only if it wins (gates pass, PSNR/LPIPS better beyond
+noise, no camera regresses). After the first run, use `--skip-sfm` for every training-only lever.
+
+```sh
+N=drive1; R="otrv recon $N --eval --steps 30000"
+otrv prep <clip> --name $N --start <s> --dur 20 --fps 3
+$R --lpips-loss-weight 0 --max-splats 10000000 --sky off --no-prune --no-dehaze
+otrv bench $N --note "v1 control (fps 3)"
+```
+
+1. `prep --fps 6` (re-prep, full SfM): the coverage lever; watch registration and SfM time.
+2. `--sky alpha`: removes the sky dome haze; cheap.
+3. `--lpips-loss-weight 0.05`: LPIPS and the road band should improve; watch train time.
+4. `--max-splats 3000000`: on 16 GB this is as much about memory/time as quality.
+5. `--color-norm`: per-camera PSNR on the repeaters and back.
+6. `--dense-init` (`uv sync --extra quality`): road band and far geometry.
+7. `--opac-loss-weight 1e-7` (1e-6 collapsed the smoke scene).
+8. `--prune --dehaze` (default on): no retraining, `otrv clean $N` then bench; judge on floaters and
+   haze, and by eye in `otrv view`.
+9. Brush main: `otrv setup-brush --from-source`, then `BRUSH=... $R <winning flags>` vs v0.3.0.
+
+Steps 2-7 and 9 are `--skip-sfm` runs (~75 min each); step 1 adds SfM; step 8 takes seconds.

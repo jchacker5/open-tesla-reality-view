@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from tsplat import bench
@@ -30,6 +31,38 @@ def test_registration_counts_per_camera(tmp_path):
     assert r["back"]["registered"] == 1
 
 
+def test_registration_ignores_names_missing_from_images(tmp_path):
+    work = tmp_path / "run"
+    (work / "images" / "front").mkdir(parents=True)
+    for i in range(4):
+        (work / "images" / "front" / f"{i:05d}.jpg").touch()
+    (work / "meta.json").write_text(json.dumps({"cams": ["front"]}))
+    _write_model(work, ["front/front_00000.jpg", "front/front_00003.jpg", "front/front_00042.jpg"])
+    assert bench.registration(work)["front"] == {"registered": 2, "total": 4, "ratio": 0.5}
+
+
+def test_registration_from_a_stale_model_is_an_error_not_a_pass(tmp_path, monkeypatch):
+    """Model from an 18-frame prep, images/ from a 9-frame re-prep: never report 18/9 or pass the gate."""
+    monkeypatch.setattr(bench, "environment", lambda: {})
+    work = tmp_path / "run"
+    (work / "images" / "front").mkdir(parents=True)
+    for i in range(9):
+        (work / "images" / "front" / f"{i:05d}.jpg").touch()
+    (work / "meta.json").write_text(json.dumps({"cams": ["front"]}))
+    _write_model(work, [f"front/front_{i:05d}.jpg" for i in range(18)])
+    with pytest.raises(ValueError, match="stale"):
+        bench.registration(work)
+    m = bench.run("run", workdir=str(tmp_path))
+    assert "registration" in m["errors"] and m["gate_failures"]
+    assert any(f.startswith("registration:") for f in m["gate_failures"])
+
+
+def test_gate_fails_ratio_above_one_and_empty_registration():
+    m = {"registration": {"front": {"registered": 18, "total": 9, "ratio": 2.0}}, "sparse": {"reproj_px": 0.5}}
+    assert any("> 100%" in f for f in bench.gate(m))
+    assert bench.gate({"registration": {}, "sparse": {"reproj_px": 0.5}}) == ["registration: no cameras scored"]
+
+
 def test_masked_psnr_ignores_masked_pixels(tmp_path):
     work = tmp_path / "run"
     gt_dir = work / "dense" / "images" / "front"
@@ -45,9 +78,40 @@ def test_masked_psnr_ignores_masked_pixels(tmp_path):
     Image.fromarray(gt).save(gt_dir / "front_00008.jpg", quality=100)
     Image.fromarray(pred).save(ev / "front_00008.png")
     Image.fromarray(mask).save(work / "dense" / "images" / "masks" / "front_00008.png")
-    p = bench.psnr(work)
+    p = bench.psnr(work, {"eval": True, "steps": 100})
     assert p["step"] == 100 and p["views"] == 1
     assert p["per_cam"]["front"] > 40  # near-perfect on the kept half
+
+
+def test_psnr_only_reads_this_runs_eval_dir(tmp_path):
+    work = tmp_path / "run"
+    (work / "splat" / "eval_50").mkdir(parents=True)  # a previous run's renders
+    assert bench.psnr(work, {"eval": False, "steps": 50}) is None  # not an --eval run: never read
+    assert bench.psnr(work, {}) is None
+    with pytest.raises(FileNotFoundError, match="eval_100"):
+        bench.psnr(work, {"eval": True, "steps": 100})
+
+
+def test_bench_always_appends_ledger_line_for_failed_run(tmp_path, monkeypatch):
+    """SfM failed: sparse/ has no model and there is no dense/. bench still logs a gated-out line."""
+    monkeypatch.setattr(bench, "environment", lambda: {"chip": "test", "ram_gb": 16})
+    work = tmp_path / "drive"
+    (work / "images" / "front").mkdir(parents=True)
+    (work / "images" / "front" / "00000.jpg").touch()
+    (work / "sparse" / "0").mkdir(parents=True)
+    (work / "meta.json").write_text(json.dumps({"clip": "c", "start": 0, "dur": 20, "fps": 3, "cams": ["front"]}))
+    m = bench.run("drive", "broken run", workdir=str(tmp_path))
+    lines = (tmp_path / "ledger.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    logged = json.loads(lines[0])
+    assert logged["note"] == "broken run" and logged["config"]["cams"] == 1
+    assert set(logged["errors"]) == {"registration", "sparse"}
+    assert any(f.startswith("registration:") for f in logged["gate_failures"])
+    assert m["gate_failures"] == logged["gate_failures"]
+    assert json.loads((work / "metrics.json").read_text())["errors"] == logged["errors"]
+
+    bench.run("missing", workdir=str(tmp_path))  # not even meta.json: still one more line
+    assert len((tmp_path / "ledger.jsonl").read_text().splitlines()) == 2
 
 
 def test_gate_flags_low_registration_and_bad_reprojection():

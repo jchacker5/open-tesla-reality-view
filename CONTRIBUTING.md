@@ -6,14 +6,15 @@ open an issue first so we can agree on the approach.
 ## Dev setup (macOS, Apple Silicon)
 
 ```sh
-brew install uv ffmpeg colmap   # COLMAP 3.12+ (rig support)
+brew install uv ffmpeg colmap   # COLMAP 4.0+ (rig support)
 git clone https://github.com/jchacker5/open-tesla-reality-view && cd open-tesla-reality-view
 uv sync --group dev
+uv run otrv setup-brush         # Brush v0.3.0, checksum-verified, into ~/.local/opt/brush
+uv run otrv doctor              # checks every tool and prints the fix for anything missing
 ```
 
-For splat training, download a [Brush](https://github.com/ArthurBrussee/brush/releases) release
-binary for your platform and either put it at
-`~/.local/opt/brush/brush-app-aarch64-apple-darwin/brush_app` or set `BRUSH=/path/to/brush_app`.
+To use a Brush binary you built or downloaded yourself, set `BRUSH=/path/to/brush_app`. Use the
+`otrv` command everywhere (`tsplat` is only kept as an old alias).
 
 ## Tests and lint
 
@@ -23,8 +24,12 @@ uv run ruff check .           # lint (add --fix for auto-fixes)
 uv run ruff format .          # format
 ```
 
-CI runs the same three commands on Ubuntu and macOS. Keep tests synthetic: build tiny fixtures
-in `tmp_path` and don't use real clips.
+CI runs the same three commands (after `uv sync --locked --group dev`) on Python 3.11 and 3.13 on
+Ubuntu and 3.12 on macOS, plus an integration job that generates synthetic 4-camera clips with
+ffmpeg and runs `otrv ingest`, `otrv list` and `otrv prep` end to end. Keep tests synthetic: build
+tiny fixtures in `tmp_path` and don't use real clips. External tools are faked: Brush through the
+`BRUSH` env var pointing at a tiny script (see `tests/test_recon.py`), `which`/`subprocess` with
+`monkeypatch` (see `tests/test_doctor.py`), and no test touches the network.
 
 ## Footage privacy
 
@@ -44,7 +49,7 @@ usual paths, but check `git status` before you commit.
 - **Better ego masks**: more accurate car-body masks, especially for the repeaters.
 - **HW3 camera layouts**: rig priors and pairing for cars without pillar cameras.
 - **Viewer features**: playback controls, measurement, export, mobile.
-- **ViewNeXt integration**: wire up `tsplat nvs-export` output once the weights are released.
+- **ViewNeXt integration**: wire up `otrv nvs-export` output once the weights are released.
 
 ## Pull requests
 

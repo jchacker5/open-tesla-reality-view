@@ -17,7 +17,7 @@ body:
     id: command
     attributes:
       label: Command and output
-      description: The exact `otrv` / `tsplat` command and the error output (redact paths or locations if needed).
+      description: The exact `otrv` command and the error output (redact paths or locations if needed). Add `--debug` for a traceback.
       render: shell
     validations:
       required: true
@@ -30,7 +30,7 @@ body:
     id: env
     attributes:
       label: Environment
-      description: OS and chip, Python, `colmap -h | head -1`, `ffmpeg -version | head -1`, Brush version.
+      description: The output of `uv run otrv doctor` (OS, chip, ffmpeg, COLMAP, Brush, disk, RAM), plus your Python version.
       render: text
     validations:
       required: true

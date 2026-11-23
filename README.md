@@ -4,7 +4,7 @@
 
 **Your Tesla's dashcam footage, rebuilt as a 3D world you can fly through.**
 
-Pull the USB drive from your glovebox, run five commands, and replay your drive as a
+Pull the USB drive from your glovebox, run `ingest`, `prep`, `recon` and `view`, and replay your drive as a
 [3D Gaussian splat](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/): a chase cam behind
 your car, every camera feed beside it, and speed, steering and Autopilot state from the telemetry
 Tesla saves in each clip. Runs locally on an Apple-silicon Mac. No cloud, no account, your footage
@@ -46,34 +46,58 @@ never leaves your machine.
 ## Quick start
 
 ```sh
-# 1. tools (macOS, Apple Silicon)
-brew install uv ffmpeg colmap
-mkdir -p ~/.local/opt/brush && cd ~/.local/opt/brush
-curl -LO https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz
-tar xf brush-app-aarch64-apple-darwin.tar.xz && cd -
-
-# 2. this repo
+# 1. tools + this repo (macOS, Apple silicon)
+brew install uv ffmpeg colmap            # COLMAP 4.0+ (rig support)
 git clone https://github.com/jchacker5/open-tesla-reality-view && cd open-tesla-reality-view
 uv sync
+uv run otrv setup-brush                  # downloads Brush v0.3.0, verifies its sha256, installs to ~/.local/opt/brush
+uv run otrv doctor                       # checks every tool; prints the exact fix for anything missing
 
-# 3. your footage: plug the car's USB drive into the Mac
-uv run otrv ingest                       # copies /Volumes/*/TeslaCam -> data/teslacam (resumable)
-uv run otrv list                         # clips with 4+ cameras
-uv run otrv egomask                      # once: masks your car's body (needs 8+ clips)
+# 2. your footage: plug the car's USB drive into the Mac
+uv run otrv ingest                       # copies RecentClips + SavedClips -> data/teslacam (resumable)
+uv run otrv list                         # clips with 4+ cameras and their mean speed
+uv run otrv suggest                      # best 20 s windows of 10-40 mph, as ready-to-paste prep commands
 
-# 4. pick 20 seconds of driving and rebuild it
-uv run otrv prep 2026-11-20_07-20-00 --name drive1 --start 10 --dur 20 --mask-movers
-uv run otrv recon drive1                 # SfM + splat training: ~20-40 min on an M-series Mac
+# 3. rebuild 20 seconds of driving
+uv run otrv prep 2026-11-20_07-20-00 --name drive1 --start 10 --dur 20
+uv run otrv recon drive1                 # SfM + splat training: the slow step (see Costs below)
 uv run otrv view drive1                  # opens the replay in your browser
 ```
 
-Already have footage on another disk? `uv run otrv ingest --src /path/to/TeslaCam`, or symlink it
-to `data/teslacam` and run `uv run otrv ingest --index-only`. The tool only reads from the source.
-Nothing on the car's drive is modified.
+Every command has `--help` with defaults, units and time costs. `ingest`, `prep` and `recon` run a
+quick `doctor` check first and stop with the fix if a tool is missing; errors print one line
+(add `--debug` for the traceback).
 
-**Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight.
-Highways, night and parked clips reconstruct poorly. `--fps 4` helps for slow driving.
-`recon --steps 30000` gives the best quality, and `recon --live` opens Brush's live training window.
+**Viewing needs internet.** The viewer loads three.js and Spark from a CDN. Your footage and splat
+stay on your machine; only those libraries are fetched.
+
+Already have footage on another disk? `uv run otrv ingest --src /path/to/TeslaCam`, or keep the
+footage somewhere else entirely with `--data /path` (or `export OTRV_DATA=/path`): ingest, list,
+suggest, egomask and prep all use it. The tool only reads from the source; nothing on the car's
+drive is modified. `ingest --since 2026-11-01` copies only recent clips, and Sentry clips (recorded
+while parked) are opt-in: `--kinds RecentClips,SavedClips,SentryClips`. Before copying, ingest
+prints the size and your free space, and stops if it won't fit.
+
+**Optional extras.**
+- `uv run otrv egomask`: builds better masks of your own car's body from 8+ driving clips (run
+  once). Without it, `prep` guesses the mask from the window, which works but is rougher.
+- `prep --mask-movers`: masks moving cars and people with YOLO so they don't leave smears. Needs
+  `uv sync --extra movers` first, which downloads PyTorch (~1 GB).
+
+**Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight
+(`otrv suggest` finds these from telemetry). Highways, night and parked clips reconstruct poorly.
+`--fps 4` helps for slow driving. `recon --steps 30000` gives the best quality, and `recon --live`
+opens Brush's live training window.
+
+### Costs
+
+| Step | Cost |
+|---|---|
+| `ingest` | Disk: whatever you copy. A full hour of RecentClips from 4-6 cameras is several GB; ingest prints the exact size first. Narrow it with `--since` / `--kinds`. |
+| `uv sync --extra movers` | ~1 GB download (PyTorch + ultralytics). Only needed for `--mask-movers`. |
+| `prep` (20 s at 3 fps) | ~1-2 min. 240 images on a 4-camera car, 360 on a 6-camera car. |
+| `recon` (20 s at 3 fps, 4 cameras = 240 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB**. Time scales roughly with `--steps`, so the default 15000 should take about half that; COLMAP adds a few minutes. |
+| `work/<name>/` | A few GB per run (frames, masks, dense model, splat checkpoints). |
 
 ## How it works
 
@@ -89,11 +113,14 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 
 | Step | What happens |
 |---|---|
-| `ingest` | rsync the drive's `TeslaCam` folder, group per-camera files into clips |
-| `egomask` | find pixels that look identical across many different drives: that's your car's body |
+| `doctor` | check OS, ffmpeg, COLMAP 4.0+ (with `rig_configurator`), Brush 0.3.x, disk and RAM; print fixes |
+| `setup-brush` | download the Brush v0.3.0 release for your platform, verify its published sha256, install it |
+| `ingest` | rsync the chosen `TeslaCam` folders, group per-camera files into clips, read each clip's mean speed from its telemetry |
+| `list` / `suggest` | show clips with speed; rank 20 s windows by sustained 10-40 mph and print `prep` commands |
+| `egomask` | optional: find pixels that look identical across many different drives: that's your car's body |
 | `prep` | sample frames, mask the car (and optionally moving objects), write a rig-aware match list (same camera over time + overlapping neighbours) and the approximate rig, decode telemetry, cut the side-panel clips |
 | `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
-| `view` | local server with byte-range support, so the synced videos can seek |
+| `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
 
@@ -132,9 +159,12 @@ folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open i
 
 ## Requirements
 
-- macOS on Apple Silicon (M1 or newer). Linux and Windows are on the [roadmap](#roadmap).
+- macOS on Apple silicon (M1 or newer). Brush publishes no Intel-Mac build. Linux and Windows
+  x86_64 have Brush builds but are untested; see the [roadmap](#roadmap).
 - 16 GB+ RAM recommended; a 20 s clip uses a few GB of disk in `work/`.
-- Python 3.11+ via [uv](https://docs.astral.sh/uv/), ffmpeg, COLMAP 3.12+ (rig support), Brush v0.3.0.
+- Python 3.11+ via [uv](https://docs.astral.sh/uv/), ffmpeg, **COLMAP 4.0+** (rig support), Brush
+  v0.3.0 (`otrv setup-brush`, or set `BRUSH=/path/to/brush_app`). `otrv doctor` checks all of it.
+- Internet access to open the viewer (three.js and Spark load from a CDN).
 - Telemetry needs Tesla firmware 2025.44.25+ on HW3/HW4. Older clips still reconstruct, just
   without the HUD.
 

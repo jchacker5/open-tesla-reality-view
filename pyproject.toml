@@ -10,7 +10,7 @@ movers = ["ultralytics>=8.3"]
 # `otrv render`: headless Chromium drives the viewer. Then: `uv run playwright install chromium`.
 render = ["playwright>=1.49"]
 # `otrv render --enhance`: NVIDIA Difix (weights under the NVIDIA License, non-commercial; see docs/RENDER.md).
-# Pinned to the versions Difix3D was released against.
+# Pinned to the versions Difix3D was released against. Incompatible with `quality`'s newer transformers.
 enhance = [
   "torch>=2.2",
   "diffusers==0.25.1",
@@ -21,13 +21,32 @@ enhance = [
   "accelerate",
   "opencv-python-headless>=4.8",
 ]
+# Bench v2 LPIPS, Depth Anything V2 dense init, the sky segmentation model: ~1 GB (PyTorch).
+quality = ["torch>=2.3", "torchvision>=0.18", "lpips>=0.1.4", "transformers>=4.45"]
+studio = [
+    "fastapi==0.162.1",
+    "uvicorn==0.54.0",
+]
 
 [project.scripts]
 otrv = "tsplat.__main__:main"
 tsplat = "tsplat.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+# Difix pins transformers 4.38; bench v2 needs transformers 4.45+. Install one extra at a time.
+[tool.uv]
+conflicts = [
+  [
+    { extra = "enhance" },
+    { extra = "quality" },
+  ],
+]
 
 [tool.ruff]
 line-length = 120
@@ -46,6 +65,7 @@ packages = ["tsplat"]
 # at viewer/index.html; a source checkout (incl. editable installs) reads it from there.
 [tool.hatch.build.targets.wheel.force-include]
 "viewer/index.html" = "tsplat/viewer/index.html"
+"viewer/car.js" = "tsplat/viewer/car.js"
 
 [build-system]
 requires = ["hatchling"]

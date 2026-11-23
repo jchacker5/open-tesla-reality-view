@@ -1,10 +1,11 @@
 """Turn one 4- or 6-camera clip window into a COLMAP-ready dataset + viewer assets.
 
 work/<name>/
-  images/<cam>/00000.jpg          frames sampled at --fps from every camera
+  images/<cam>/00000.jpg          frames sampled at --fps (default 6) from every camera
   masks/<cam>/00000.jpg.png  COLMAP masks (black = ignore): ego-car body (+ movers if requested)
+  sky/<cam>/00000.jpg.png    sky masks (white = sky; see sky.py), sky.json: sky colours for the viewer
   rig_config.json            approximate Tesla camera layout, refined by COLMAP bundle adjustment
-  pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours)
+  pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours; windows scale with fps)
   viewer/cams/<cam>.mp4      trimmed, downscaled clips for the side panel
   viewer/telemetry.json      SEI speed/GPS/steering at ~10 Hz (if the clip has it)
   meta.json                  clip id, window (dur = frames actually extracted / fps), cameras
@@ -23,7 +24,7 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import binary_closing, binary_opening, median_filter
 
-from . import sei
+from . import holdout, sei, sky
 from .ingest import CAMS
 
 # Which cameras can see the same scene (spatially, allowing for car motion over time).
@@ -227,7 +228,12 @@ def write_masks(out: Path, cams: list[str], movers: bool, prebuilt: Path | None)
             Image.fromarray(m).save(md / f"{f.name}.png")
 
 
-def write_pairs(out: Path, cams: list[str], same_k: int = 5, cross_k: int = 8) -> int:
+def write_pairs(out: Path, cams: list[str], same_k: int = 5, cross_k: int = 8, fps: float = 3.0) -> int:
+    """Match list: each frame with the next `same_k` frames of its camera and the neighbouring cameras'
+    frames within `cross_k`. The windows are tuned at 3 fps and scaled by fps / 3, so they span the
+    same time (and road distance) at any --fps."""
+    same_k = max(1, round(same_k * fps / 3))
+    cross_k = max(1, round(cross_k * fps / 3))
     nbrs = neighbours(cams)
     if not ({"left_pillar", "right_pillar"} & set(cams)):
         cross_k *= 2
@@ -376,12 +382,28 @@ def ego_mask_summary(egodir: Path, cams: list[str]) -> str:
 
 # Everything prep and the steps after it write. Re-prepping a name invalidates all of it: a new window
 # with an old dense/ or splat would let `otrv bench` score (and `otrv view` show) the previous run.
-STALE_DIRS = ("images", "masks", "viewer/cams", "sparse", "dense", "splat", "nvs", "_maskimgs", "_maskdense")
+STALE_DIRS = (
+    "images",
+    "masks",
+    "sky",
+    "viewer/cams",
+    "sparse",
+    "dense",
+    "dense_base",
+    "splat",
+    "nvs",
+    "_maskimgs",
+    "_maskdense",
+)
 STALE_FILES = (
     "colmap.db",
+    "sky.json",
+    "viewer/collision.json",
     "recon_args.json",
     "timings.json",
     "metrics.json",
+    "clean.json",
+    "viewer/scene_raw.ply",
     "meta.json",
     "pairs.txt",
     "rig_config.json",
@@ -408,6 +430,7 @@ def run(
     width: int,
     movers: bool,
     workdir: str = "work",
+    sky_model: bool = False,
 ) -> Path:
     clips = json.loads(Path(index).read_text())
     clip = next((c for c in clips if c["id"] == clip_id or c["timestamp"] == clip_id), None)
@@ -416,6 +439,8 @@ def run(
     check_window(clip, start, dur)
     if movers and importlib.util.find_spec("ultralytics") is None:  # fail before any (slow) extraction
         raise SystemExit("--mask-movers needs ultralytics: run `uv sync --extra movers` (~1 GB PyTorch download)")
+    if sky_model and importlib.util.find_spec("transformers") is None:
+        raise SystemExit("--sky-model needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
     cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
@@ -430,7 +455,8 @@ def run(
     egodir = Path(index).parent / "egomask"
     print(ego_mask_summary(egodir, list(cams)))
     write_masks(out, list(cams), movers, egodir)
-    print(f"pairs: {write_pairs(out, list(cams))}")
+    sky.write(out, list(cams), sky_model)
+    print(f"pairs: {write_pairs(out, list(cams), fps=fps)}")
     write_rig_config(out, list(cams))
     write_viewer_assets(cams, out, start, actual_dur)
     (out / "meta.json").write_text(
@@ -444,6 +470,10 @@ def run(
                 "fps": fps,
                 "frames": counts,
                 "cams": list(cams),
+                "width": width,
+                "sky_model": sky_model,
+                "mask_movers": movers,
+                "eval_times": holdout.eval_times(actual_dur),
             },
             indent=1,
         )

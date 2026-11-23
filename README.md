@@ -33,8 +33,9 @@ never leaves your machine.
   people can be masked with YOLO segmentation so they don't leave smears.
 - **Gaussian splat training on your Mac's GPU** with [Brush](https://github.com/ArthurBrussee/brush)
   (Metal).
-- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): chase, driver and free-fly cameras,
-  the raw camera feeds synced on the side, and a telemetry HUD.
+- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): chase, driver, drone and free-fly
+  cameras, the raw camera feeds synced on the side, a telemetry HUD, a GPS street map, and a
+  drive mode where you take the wheel inside the reconstruction (keyboard, gamepad or touch).
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
   signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
@@ -62,6 +63,16 @@ uv run otrv prep 2026-11-20_07-20-00 --name drive1 --start 10 --dur 20
 uv run otrv recon drive1                 # SfM + splat training: the slow step (see Costs below)
 uv run otrv view drive1                  # opens the replay in your browser
 ```
+
+**Higher fidelity (pipeline v2).** `prep` samples 6 fps by default, and `recon` trains with a
+transparent sky (plus a perceptual LPIPS loss on a source-built Brush) and prunes floaters inside
+the car's own path afterwards (`--dehaze` adds more clean-up rules; off until validated). Optional
+levers: `recon --color-norm` (match every camera's colour to the front camera), `recon --dense-init`
+(Depth Anything V2 points plus a road ribbon; needs `uv sync --extra quality`), and
+`otrv setup-brush --from-source` (builds Brush's main branch, with its needle-splat fix and mip
+filter, if you have Rust's cargo). Every flag, its default and the order to A/B them are in
+[docs/HILL_CLIMB.md](docs/HILL_CLIMB.md). `recon` also bakes `viewer/collision.json` (ground height
+and distance-to-wall grids) for the viewer's drive mode; `otrv collision drive1` re-bakes it.
 
 Every command has `--help` with defaults, units and time costs. `ingest`, `prep` and `recon` run a
 quick `doctor` check first and stop with the fix if a tool is missing; errors print one line
@@ -93,8 +104,29 @@ extra and asks you to accept its terms first. See [docs/RENDER.md](docs/RENDER.m
 
 **Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight
 (`otrv suggest` finds these from telemetry). Highways, night and parked clips reconstruct poorly.
-`--fps 4` helps for slow driving. `recon --steps 30000` gives the best quality, and `recon --live`
+The default 6 fps gives SfM more overlap; `--fps 3` is the faster v1 setting. `recon --steps 30000` gives the best quality, and `recon --live`
 opens Brush's live training window.
+
+### Studio (web app)
+
+Prefer clicking to typing? `otrv studio` runs the same steps as a local web app:
+
+```sh
+uv sync --extra studio
+uv run otrv studio        # opens http://127.0.0.1:8770/?token=...
+```
+
+Pick your footage (it finds a plugged-in TeslaCam drive, or you choose a folder). Your drives appear
+with thumbnails, speed and route. Drag a 20-60 s window over the speed strip, or take a suggested one,
+and press **Build**. The stepper (frames → masks → features → match → map → undistort → train →
+export) shows live progress and an ETA, and builds can be cancelled and resumed. Finished cities go
+to the **Gallery**, where you can **Drive** them or **Replay** them.
+
+Everything stays on your Mac. The server listens on 127.0.0.1 only and needs the token in the URL it
+prints. Footage is read in place, and only the clip you build is copied. The studio's pages make no
+external requests. Cities open from a second local server (the next port, no token, its own CSP; the
+replay viewer still loads three.js/Spark from a CDN), so a city page can't reach the studio. See
+[docs/STUDIO.md](docs/STUDIO.md).
 
 ### Costs
 
@@ -102,8 +134,9 @@ opens Brush's live training window.
 |---|---|
 | `ingest` | Disk: whatever you copy. A full hour of RecentClips from 4-6 cameras is several GB; ingest prints the exact size first. Narrow it with `--since` / `--kinds`. |
 | `uv sync --extra movers` | ~1 GB download (PyTorch + ultralytics). Only needed for `--mask-movers`. |
-| `prep` (20 s at 3 fps) | ~1-2 min. 240 images on a 4-camera car, 360 on a 6-camera car. |
-| `recon` (20 s at 3 fps, 4 cameras = 240 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB**. Time scales roughly with `--steps`, so the default 15000 should take about half that; COLMAP adds a few minutes. |
+| `prep` (20 s at 6 fps) | ~1-2 min. 480 images on a 4-camera car, 720 on a 6-camera car. |
+| `recon` (20 s at 6 fps, 4 cameras = 480 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB** (240 images at 3 fps). Time scales roughly with `--steps`, so the default 15000 should take about half that. COLMAP takes ~3x longer at 6 fps than at 3 fps (4x the image pairs): a few minutes becomes 10-15. |
+| `setup-brush --from-source` | Optional. Rust 1.98+ (`rustup update stable`); ~10-20 min and a few GB of disk for the first build. |
 | `work/<name>/` | A few GB per run (frames, masks, dense model, splat checkpoints). |
 
 ## How it works
@@ -121,16 +154,55 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | Step | What happens |
 |---|---|
 | `doctor` | check OS, ffmpeg, COLMAP 4.0+ (with `rig_configurator`), Brush 0.3.x, disk and RAM; print fixes |
-| `setup-brush` | download the Brush v0.3.0 release for your platform, verify its published sha256, install it |
+| `setup-brush` | download the Brush v0.3.0 release for your platform, verify its published sha256, install it (`--from-source`: build Brush main at a pinned commit with cargo) |
 | `ingest` | rsync the chosen `TeslaCam` folders, group per-camera files into clips, read each clip's mean speed from its telemetry |
 | `list` / `suggest` | show clips with speed; rank 20 s windows by sustained 10-40 mph and print `prep` commands |
 | `egomask` | optional: find pixels that look identical across many different drives: that's your car's body |
 | `prep` | sample frames, mask the car (and optionally moving objects), write a rig-aware match list (same camera over time + overlapping neighbours) and the approximate rig, decode telemetry, cut the side-panel clips |
-| `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → trajectory, with real-world scale from telemetry speed |
+| `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → prune/dehaze → drive-mode collision grids, plus the trajectory with real-world scale from telemetry speed |
+| `clean` / `collision` | re-run the post-train clean-up or the collision bake without retraining |
 | `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
 | `render` | drive the viewer's render mode in headless Chromium, capture splat and overlay layers per frame, optionally clean up with Difix and stabilise, composite, encode H.264; see [docs/RENDER.md](docs/RENDER.md) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
+| `studio` | local web app over all of the above: sources, drives, window picking, a build queue with live progress, gallery ([docs/STUDIO.md](docs/STUDIO.md)) |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
+
+## The viewer
+
+`viewer/` is a static page (`index.html` + `car.js`, three.js and Spark from a CDN). Serve the
+folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open it in a browser.
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `Space` | play / pause (handbrake while driving) | `←` `→` | ∓2 s (steer while driving) |
+| `1` `2` `3` | chase, driver, free camera | `5` | drone camera over the street map |
+| `4` | **drive** the car yourself | `R` / double-click | reset the view |
+| `U` | hide the UI | `F` / `M` | fullscreen / mute |
+
+- **Cameras.** Drag to orbit and wheel or pinch to zoom; follow cameras spring back after 2 s.
+  In free mode, right-drag, Shift-drag or two fingers pan.
+- **Drive mode** (`4`, the DRIVE button or gamepad Start). An arcade car model at 120 Hz. Keyboard:
+  W/A/S/D or arrows, Shift boost, Space handbrake, H horn, C look back, V camera. Gamepads with the
+  standard mapping: RT/LT throttle and brake/reverse, left stick steers, A handbrake, B horn,
+  Y camera, right stick looks around. On phones there's a joystick plus gas, brake and handbrake
+  buttons. The car stays near the recorded road, where the splat exists. An optional
+  `collision.json` next to `scene.ply` adds real ground height and walls.
+- **Sound** is synthesised in the browser: motor whine, wind, tyres, horn and a reverse chime.
+  It starts on your first click or key press. You can use your own recordings instead, see
+  [viewer/sounds/README.md](viewer/sounds/README.md).
+- **Your car.** By default the viewer draws a built-in white crossover. With a glTF model in
+  `viewer/models/` (`otrv car fetch` installs one, `otrv view` copies it) the real car is shown,
+  repainted, with working lamps, blinkers and wheels, and its credit is shown at the bottom-left.
+  See [viewer/models/README.md](viewer/models/README.md). Models are never committed.
+- **Map (opt-in).** With GPS in the clip, the minimap always shows the route on a dark background.
+  The `map` button (or `?map=1`) adds Esri's dark street tiles to the minimap and under the drone
+  camera. It is off by default because tile requests reveal the drive's approximate location to
+  Esri, and the viewer says so the first time you turn it on. `?map=0` forces it off.
+- **Camera column.** Click a camera tile to see the reconstruction from that camera's position on
+  the car. `C` or `hide` collapses the column.
+- **Sharing.** `link` copies a `#t=…&cam=…` deep link, `rec` records the 3D view to a `.webm`
+  file. Use `?ui=0`, `?clean=1` and `?aspect=9:16` for clean recordings. `?render=1` exposes
+  `window.otrvRender` for frame-exact offline rendering (see the comment block in `index.html`).
 
 ## Requirements
 

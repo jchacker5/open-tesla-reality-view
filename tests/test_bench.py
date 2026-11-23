@@ -119,3 +119,106 @@ def test_gate_flags_low_registration_and_bad_reprojection():
     fails = bench.gate(m)
     assert any("front" in f for f in fails) and any("reprojection" in f for f in fails)
     assert not any("back" in f for f in fails)
+
+
+def _eval_view(work, stem="front_00008", h=40, w=20, ext=".jpg"):
+    """A held-out view: mid-grey ground truth (no mask file, so every pixel counts)."""
+    cam = stem.rsplit("_", 1)[0]
+    (work / "dense" / "images" / cam).mkdir(parents=True, exist_ok=True)
+    (work / "splat" / "eval_100").mkdir(parents=True, exist_ok=True)
+    gt = np.full((h, w, 3), 128, np.uint8)
+    Image.fromarray(gt).save(work / "dense" / "images" / cam / f"{stem}{ext}", quality=100)
+    return gt
+
+
+def test_road_band_is_the_bottom_35_percent(tmp_path):
+    work = tmp_path / "run"
+    gt = _eval_view(work)
+    pred = gt.copy()
+    pred[:26] = 0  # top 65% wrong, bottom 35% (rows 26..39) right
+    Image.fromarray(pred).save(work / "splat" / "eval_100" / "front_00008.png")
+    v = bench.view_metrics(work, {"eval": True, "steps": 100})
+    assert v["road"]["psnr"] > 40 and v["psnr"]["overall"] < 15
+    assert v["lpips"] is None and v["road"]["lpips"] is None  # no LPIPS model given: skipped
+
+
+def test_sky_mask_is_excluded_and_lpips_is_masked(tmp_path):
+    work = tmp_path / "run"
+    gt = _eval_view(work, ext=".png")  # transparent-sky runs train on .png
+    pred = gt.copy()
+    pred[:10] = 255  # sky rendered differently (it's transparent in training): must not count
+    Image.fromarray(pred).save(work / "splat" / "eval_100" / "front_00008.png")
+    sky = np.zeros((40, 20), np.uint8)
+    sky[:10] = 255
+    (work / "dense" / "sky").mkdir(parents=True)
+    Image.fromarray(sky).save(work / "dense" / "sky" / "front_00008.png")
+
+    def fake_lpips(p, g):
+        return np.abs(p - g).mean(2)  # a per-pixel map, like lpips(spatial=True)
+
+    v = bench.view_metrics(work, {"eval": True, "steps": 100}, fake_lpips)
+    assert v["psnr"]["sky_excluded"] and v["psnr"]["overall"] > 40
+    assert v["lpips"]["overall"] == 0 and v["lpips"]["per_cam"] == {"front": 0}
+    assert v["road"]["lpips"] == 0
+
+
+def test_floaters_card_and_seed_in_ledger(tmp_path, monkeypatch):
+    from splatfix import make_ply, write_path
+
+    from tsplat import splats
+
+    monkeypatch.setattr(bench, "environment", lambda: {})
+    work = tmp_path / "run"
+    (work / "images" / "front").mkdir(parents=True)
+    (work / "meta.json").write_text(json.dumps({"clip": "c", "fps": 6, "sky_model": False, "cams": ["front"]}))
+    (work / "recon_args.json").write_text(json.dumps({"steps": 100, "seed": 7, "prune": True, "sky": "alpha"}))
+    write_path(work / "viewer" / "path.json")
+    raw = make_ply([[0, -1.0, 2], [0, -1.0, 3], [8, -1.0, 3]])
+    (work / "splat").mkdir()
+    splats.write_ply(work / "splat" / "splat_100.ply", raw)
+    splats.write_ply(work / "viewer" / "scene.ply", raw.subset(np.array([False, False, True])))
+    (work / "clean.json").write_text(json.dumps({"before": 3, "after": 1, "removed": {"tube": 2}}))
+    m = bench.run("run", workdir=str(tmp_path))
+    assert {k: m["floaters"][k] for k in ("scene", "splats", "raw", "splats_raw")} == {
+        "scene": 0,
+        "splats": 1,
+        "raw": 2,
+        "splats_raw": 3,
+    }
+    assert m["config"]["seed"] == 7 and m["config"]["sky"] == "alpha" and m["config"]["fps"] == 6
+    c = bench.card(m)
+    assert "floaters in ego tube: 0 of 1 splats (2 of 3 before clean-up)" in c
+    assert "clean: 3 -> 1 splats (tube 2)" in c and "haze: 0.0% of opacity mass" in c
+    assert "floaters" not in m["errors"]
+    logged = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
+    assert logged["floaters"]["raw"] == 2 and logged["config"]["seed"] == 7
+
+
+def _textured(h=40, w=20, seed=0):
+    return np.random.default_rng(seed).integers(40, 200, (h, w, 3)).astype(np.uint8)
+
+
+def test_ground_truth_is_dense_base_not_the_colour_normalised_dense(tmp_path):
+    """--color-norm rewrites dense/images; bench must keep scoring against the untouched dense_base/."""
+    work = tmp_path / "run"
+    truth = _textured()
+    for root, img in (("dense_base", truth), ("dense", np.clip(truth.astype(int) + 60, 0, 255).astype(np.uint8))):
+        (work / root / "images" / "front").mkdir(parents=True)
+        Image.fromarray(img).save(work / root / "images" / "front" / "front_00008.png")
+    (work / "splat" / "eval_100").mkdir(parents=True)
+    Image.fromarray(truth).save(work / "splat" / "eval_100" / "front_00008.png")
+    v = bench.view_metrics(work, {"eval": True, "steps": 100})
+    assert v["psnr"]["gt"] == "dense_base" and v["psnr"]["overall"] > 40
+
+
+def test_colour_corrected_psnr_factors_out_exposure(tmp_path):
+    work = tmp_path / "run"
+    (work / "dense" / "images" / "front").mkdir(parents=True)
+    (work / "splat" / "eval_100").mkdir(parents=True)
+    truth = _textured()
+    Image.fromarray(truth).save(work / "dense" / "images" / "front" / "front_00008.png")
+    darker = (truth.astype(np.float32) * 0.7 + 10).astype(np.uint8)  # an exposure/offset difference only
+    Image.fromarray(darker).save(work / "splat" / "eval_100" / "front_00008.png")
+    v = bench.view_metrics(work, {"eval": True, "steps": 100})
+    assert v["psnr"]["overall"] < 25 and v["psnr_cc"]["overall"] > 40
+    assert v["psnr_cc"]["per_cam"]["front"] == v["psnr_cc"]["overall"]

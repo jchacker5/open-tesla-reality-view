@@ -240,6 +240,7 @@
         <button id="mDrive" class="primary" title="Drive the car yourself (4 / gamepad Start)" aria-label="Drive mode" aria-pressed="false">DRIVE</button>
         <button id="share" title="Copy a link to this moment" aria-label="Copy a link to this moment">link</button>
         <button id="record" title="Record the 3D view to a .webm file" aria-label="Record video" aria-pressed="false">rec</button>
+        <button id="mapBtn" title="Street map under the drive (loads tiles from Esri)" aria-label="Street map" aria-pressed="false" hidden>map</button>
         <button id="mute" title="Mute (M)" aria-label="Mute" aria-pressed="false">🔇</button>
       </div>
     </div>
@@ -896,7 +897,7 @@ let rec = null;
 function creditLines() {
   const lines = [];
   if (carCredit) lines.push(carCredit.replace(/\s*\(https?:\/\/[^)]*\)/g, ""));
-  if (mapLayer.ready && (domCache.get("minimap.hidden") === false || mapLayer.underlay?.visible)) lines.push(MAP_ATTR);
+  if (tilesOn() && (domCache.get("minimap.hidden") === false || mapLayer.underlay?.visible)) lines.push(MAP_ATTR);
   return lines;
 }
 function paintRecording() {
@@ -1590,7 +1591,7 @@ const unmerc = (px, py, z) => {
   return { lat: THREE.MathUtils.radToDeg(Math.atan(Math.sinh(Math.PI * (1 - (2 * py) / n)))), lon: (px / n) * 360 - 180 };
 };
 async function buildMapLayer() {
-  if (!GEO || RENDER && Q.get("map") === "0") return;
+  if (!GEO || mapLayer.ready) return;
   const lats = GEO.pts.map((f) => +f.lat), lons = GEO.pts.map((f) => +f.lon);
   const pad = 350 / EARTH_M * (180 / Math.PI); // ~350 m around the track
   const padLon = pad / Math.cos(THREE.MathUtils.degToRad(GEO.lat0));
@@ -1646,12 +1647,37 @@ async function buildMapLayer() {
   $("mapAttr").textContent = MAP_ATTR;
   window.otrvRender.mapCredit = MAP_ATTR; // for exports that show the drone underlay
 }
-const mapBuilt = buildMapLayer().catch((e) => console.warn("map layer failed:", e));
+// Privacy: tile requests tell Esri roughly where this drive was, so the map is OPT-IN. Off by default;
+// the "map" button (or ?map=1) turns it on, ?map=0 forces it off (render mode passes it, except for
+// drone shots). The first time it is turned on a one-line notice says so. Without tiles the GPS track,
+// the minimap polyline and everything else still work on the dark background.
+const MAP_NOTICE = "Map tiles load from Esri and reveal this drive's approximate location.";
+const MAP_FORCED_OFF = Q.get("map") === "0";
+let mapOn = false, mapBuilt = Promise.resolve();
+const tilesOn = () => mapOn && mapLayer.ready;
+function setMap(on, { remember = true } = {}) {
+  on = !!on && !!GEO && !MAP_FORCED_OFF;
+  mapOn = on;
+  setAttr("mapBtn", "aria-pressed", on);
+  if (remember) try { localStorage.setItem("otrv.map", on ? "on" : "off"); } catch {}
+  if (!on) return;
+  let seen = false;
+  try { seen = localStorage.getItem("otrv.mapNotice") === "1"; localStorage.setItem("otrv.mapNotice", "1"); } catch {}
+  if (!seen && !RENDER) toast(MAP_NOTICE, 5000);
+  mapBuilt = buildMapLayer().catch((e) => console.warn("map layer failed:", e));
+}
+if (GEO && !MAP_FORCED_OFF && !RENDER) $("mapBtn").hidden = false;
+$("mapBtn").onclick = () => setMap(!mapOn);
+{
+  let saved = false;
+  try { saved = localStorage.getItem("otrv.map") === "on"; } catch {}
+  if (Q.get("map") === "1" || (saved && !RENDER)) setMap(true, { remember: Q.get("map") !== "1" });
+}
 // the underlay fades in under the drone camera only
 function updateUnderlay(dt, on) {
   const m = mapLayer.underlay;
   if (!m) return;
-  const target = on ? 0.9 : 0;
+  const target = on && mapOn ? 0.9 : 0;
   m.material.opacity += (target - m.material.opacity) * (dt == null ? 1 : 1 - Math.exp(-4 * dt));
   m.visible = m.material.opacity > 0.01;
 }
@@ -1674,7 +1700,7 @@ function drawMinimap(cx, cz, psi, corridor) {
   mmCtx.clearRect(0, 0, S, S);
   mmCtx.beginPath(); mmCtx.arc(S / 2, S / 2, S / 2 - 1, 0, Math.PI * 2); mmCtx.clip();
   if (corridor) { mmCtx.fillStyle = hatch; mmCtx.fillRect(0, 0, S, S); }
-  if (mapLayer.ready) {
+  if (tilesOn()) {
     const A = mapLayer.px2xz, o = proj(A.c, A.f), ex = proj(A.a + A.c, A.d + A.f), ey = proj(A.b + A.c, A.e + A.f);
     mmCtx.save();
     mmCtx.globalAlpha = corridor ? 0.75 : 1;
@@ -1685,7 +1711,7 @@ function drawMinimap(cx, cz, psi, corridor) {
   }
   mmCtx.lineJoin = mmCtx.lineCap = "round";
   const line = () => { mmCtx.beginPath(); GP.forEach((pt, i) => { const [x, y] = proj(pt.x, pt.z); i ? mmCtx.lineTo(x, y) : mmCtx.moveTo(x, y); }); };
-  if (corridor) { line(); mmCtx.strokeStyle = mapLayer.ready ? "rgba(14,16,20,.55)" : "rgba(14,16,20,.96)"; mmCtx.lineWidth = DRV.soft * 2 * scale; mmCtx.stroke(); }
+  if (corridor) { line(); mmCtx.strokeStyle = tilesOn() ? "rgba(14,16,20,.55)" : "rgba(14,16,20,.96)"; mmCtx.lineWidth = DRV.soft * 2 * scale; mmCtx.stroke(); }
   line(); mmCtx.strokeStyle = "rgba(61,123,255,.9)"; mmCtx.lineWidth = 2.5 * (S / 150); mmCtx.stroke();
   mmCtx.restore();
   const k = S / 150;
@@ -1697,7 +1723,7 @@ function showMinimap(on) {
   updateMapAttr();
 }
 // tile attribution whenever tiles are on screen (minimap or underlay)
-function updateMapAttr() { setHidden("mapAttr", !((domCache.get("minimap.hidden") === false && mapLayer.ready) || mapLayer.underlay?.visible)); }
+function updateMapAttr() { setHidden("mapAttr", !((domCache.get("minimap.hidden") === false && tilesOn()) || mapLayer.underlay?.visible)); }
 let edgeToastShown = false, mmFrame = 0;
 function driveFrame(rdt) {
   const inp = readInput(rdt);
@@ -1972,8 +1998,9 @@ function loop(now) {
  *     cam    "chase"  spring chase camera behind the car (default).
  *            "driver" the front camera's view (the car is hidden: the camera is inside it).
  *            "free"   a fixed front-left three-quarter view of the car (the free-orbit reset view).
- *            "drone"  high rear view, 11 m back / 8 m up; also shows the GPS map underlay in the splat /
- *                     full layers when the clip has GPS (the tiles are background, not overlay).
+ *            "drone"  high rear view, 11 m back / 8 m up. With ?map=1 (opt-in: tiles come from Esri and
+ *                     reveal the location) it also shows the GPS map underlay in the splat / full
+ *                     layers (the tiles are background, not overlay); ?map=0 or no flag = no tiles.
  *   otrvRender.credit     attribution text of the installed car model ("" for the built-in car), for
  *                         the renderer to stamp on exported video (the on-page credit is hidden here).
  *   otrvRender.mapCredit  map tile attribution, set once GPS map tiles have loaded (stamp it when
@@ -2014,7 +2041,7 @@ async function renderFrame(t, layer = "full", opts = {}) {
     const eye = ps.carPos.clone().addScaledVector(ps.f, 5.2 * M).addScaledVector(left, 4.6 * M).addScaledVector(UP, 2.1 * M);
     lookPose(modePose, eye, ps.carPos.clone().addScaledVector(UP, 0.8 * M), 50);
   } else { settleChaseSpring(t); chasePose(modePose, ps.carPos, chaseSpring.f, cam === "drone" ? DRONE : CHASE); }
-  if (mapLayer.underlay) { mapLayer.underlay.material.opacity = 0.9; mapLayer.underlay.visible = cam === "drone" && layer !== "overlay"; }
+  if (mapLayer.underlay) { mapLayer.underlay.material.opacity = 0.9; mapLayer.underlay.visible = mapOn && cam === "drone" && layer !== "overlay"; }
   applyPose(modePose);
   camera.updateMatrixWorld();
   const overlay = layer !== "splat";

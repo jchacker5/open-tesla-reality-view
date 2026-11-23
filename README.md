@@ -151,8 +151,12 @@ folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open i
   `viewer/models/` (`otrv car fetch` installs one, `otrv view` copies it) the real car is shown,
   repainted, with working lamps, blinkers and wheels, and its credit is shown at the bottom-left.
   See [viewer/models/README.md](viewer/models/README.md). Models are never committed.
-- **Map.** With GPS in the clip, the route is placed on Esri's dark street tiles. They show in the
-  minimap and under the drone camera.
+- **Map (opt-in).** With GPS in the clip, the minimap always shows the route on a dark background.
+  The `map` button (or `?map=1`) adds Esri's dark street tiles to the minimap and under the drone
+  camera. It is off by default because tile requests reveal the drive's approximate location to
+  Esri, and the viewer says so the first time you turn it on. `?map=0` forces it off.
+- **Camera column.** Click a camera tile to see the reconstruction from that camera's position on
+  the car. `C` or `hide` collapses the column.
 - **Sharing.** `link` copies a `#t=…&cam=…` deep link, `rec` records the 3D view to a `.webm`
   file. Use `?ui=0`, `?clean=1` and `?aspect=9:16` for clean recordings. `?render=1` exposes
   `window.otrvRender` for frame-exact offline rendering (see the comment block in `index.html`).

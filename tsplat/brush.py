@@ -45,6 +45,7 @@ NO_INTEL_MAC = (
 # `otrv setup-brush --from-source`: Brush main at this commit (2026-11-22, after the native Metal backend).
 SOURCE_REPO = "https://github.com/ArthurBrussee/brush"
 SOURCE_COMMIT = "d43bd1e6b232c4d85112bdf7ad1c317b3973915e"
+SOURCE_MIN_RUST = (1, 98)  # highest rust-version among its dependencies (cargo refuses older rustc)
 # v0.3.0 flag -> its name on Brush main. Flags the installed Brush doesn't know are dropped with a warning
 # (main replaced --opac-loss-weight/--scale-loss-weight with --opac-decay and its own regularisers).
 RENAMED_FLAGS = {"--total-steps": "--total-train-iters"}
@@ -220,6 +221,14 @@ def setup_from_source(
         raise SystemExit(NO_CARGO)
     if which("git") is None:
         raise SystemExit("building Brush from source needs git (macOS: `xcode-select --install`)")
+    out = run(["rustc", "--version"], check=False, capture_output=True, text=True).stdout or ""
+    m = re.search(r"(\d+)\.(\d+)", out)
+    if m and (int(m.group(1)), int(m.group(2))) < SOURCE_MIN_RUST:
+        need = ".".join(map(str, SOURCE_MIN_RUST))
+        raise SystemExit(
+            f"Brush {commit[:12]} needs Rust {need}+ (its burn/cubecl dependencies), but rustc is "
+            f"{m.group(0)}. Run `rustup update stable`, then re-run `otrv setup-brush --from-source`."
+        )
     src = source_dir(install_dir)
     src.mkdir(parents=True, exist_ok=True)
     repo = ["git", "-C", str(src)]
@@ -241,6 +250,16 @@ def setup_from_source(
 
 
 # ---- one set of recon flags for either Brush -------------------------------------------------------
+
+
+def version(exe: str) -> tuple[int, int, int] | None:
+    """(major, minor, patch) from `<exe> --version` (v0.3.0: "brush-cli 0.3.0"), or None."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
 def cli_flags(exe: str) -> set[str] | None:

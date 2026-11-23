@@ -66,6 +66,14 @@ def _kinds(value: str) -> tuple[str, ...]:
 LPIPS_LOSS_WEIGHT = 0.05  # Brush's default is 0 (off); perceptual loss sharpens texture (bench: lpips, road)
 
 
+def lpips_weight(requested: float | None, brush_version: tuple[int, int, int] | None) -> float:
+    """--lpips-loss-weight, or the default for the installed Brush: 0.05, except 0 on Brush 0.x, whose
+    LPIPS loss asks Metal for a 28 GB buffer (BufferTooBig) on images over ~256 px and aborts."""
+    if requested is not None:
+        return requested
+    return LPIPS_LOSS_WEIGHT if brush_version and brush_version[0] >= 1 else 0.0
+
+
 def default_max_splats() -> int:
     """Brush's splat cap: 3M on a 16 GB Mac (the trainer + macOS fit), 6M with more RAM (Brush's own is 10M)."""
     gb = doctor.ram_gb()
@@ -277,8 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument(
         "--lpips-loss-weight",
         type=float,
-        default=LPIPS_LOSS_WEIGHT,
-        help="Brush perceptual (LPIPS) loss weight; Brush's own default is 0 (off)",
+        help=f"Brush perceptual (LPIPS) loss weight (default: {LPIPS_LOSS_WEIGHT} with a source-built Brush 1.x; "
+        "0 with v0.3.0, whose LPIPS loss aborts on Metal for images over ~256 px; Brush's own default is 0)",
     )
     add_clean_args(a)
     a.add_argument(
@@ -440,9 +448,9 @@ def cmd_recon(args) -> None:
         f"{args.scale_loss_weight:g}",
         "--max-splats",
         str(args.max_splats),
-        "--lpips-loss-weight",
-        f"{args.lpips_loss_weight:g}",
     ]
+    lpips = lpips_weight(args.lpips_loss_weight, brush.version(brush.path()))
+    brush_args += ["--lpips-loss-weight", f"{lpips:g}"]
     rules = clean_rules(args, args.sky)
     recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, brush_args, rules)
     timings["train"] = time.perf_counter() - t0
@@ -461,7 +469,7 @@ def cmd_recon(args) -> None:
                 "opac_loss_weight": args.opac_loss_weight,
                 "scale_loss_weight": args.scale_loss_weight,
                 "max_splats": args.max_splats,
-                "lpips_loss_weight": args.lpips_loss_weight,
+                "lpips_loss_weight": lpips,
                 "sky": args.sky,
                 "dense_init": args.dense_init,
                 "color_norm": args.color_norm,

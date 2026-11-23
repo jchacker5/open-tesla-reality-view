@@ -64,7 +64,8 @@ uv run otrv view drive1                  # opens the replay in your browser
 ```
 
 **Higher fidelity (pipeline v2).** `prep` samples 6 fps by default, and `recon` trains with a
-perceptual (LPIPS) loss, a transparent sky, and prunes and dehazes the splat afterwards. Optional
+transparent sky (plus a perceptual LPIPS loss on a source-built Brush) and prunes and dehazes the
+splat afterwards. Optional
 levers: `recon --color-norm` (match every camera's colour to the front camera), `recon --dense-init`
 (Depth Anything V2 points plus a road ribbon; needs `uv sync --extra quality`), and
 `otrv setup-brush --from-source` (builds Brush's main branch, with its needle-splat fix and mip
@@ -105,7 +106,7 @@ opens Brush's live training window.
 | `uv sync --extra movers` | ~1 GB download (PyTorch + ultralytics). Only needed for `--mask-movers`. |
 | `prep` (20 s at 6 fps) | ~1-2 min. 480 images on a 4-camera car, 720 on a 6-camera car. |
 | `recon` (20 s at 6 fps, 4 cameras = 480 images) | Training dominates: Brush at 30000 steps took **73 min on an M4 with 16 GB** (240 images at 3 fps). Time scales roughly with `--steps`, so the default 15000 should take about half that. COLMAP takes ~3x longer at 6 fps than at 3 fps (4x the image pairs): a few minutes becomes 10-15. |
-| `setup-brush --from-source` | Optional. Rust's cargo; ~10-20 min and a few GB of disk for the first build. |
+| `setup-brush --from-source` | Optional. Rust 1.98+ (`rustup update stable`); ~10-20 min and a few GB of disk for the first build. |
 | `work/<name>/` | A few GB per run (frames, masks, dense model, splat checkpoints). |
 
 ## How it works

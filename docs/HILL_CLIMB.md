@@ -70,7 +70,7 @@ Defaults are what `otrv prep` / `otrv recon` do with no flags. All of them land 
 | `prep --sky-model` | off | UperNet/ADE20K sky masks instead of the brightness heuristic (`--extra quality`) |
 | `recon --seed` | 42 | Brush seed, fixed so A/B runs differ by the lever |
 | `recon --max-splats` | 3,000,000 with <=16 GB RAM, else 6,000,000 | Brush's splat cap (Brush's own: 10M) |
-| `recon --lpips-loss-weight` | 0.05 | Brush perceptual loss (Brush's own: 0) |
+| `recon --lpips-loss-weight` | 0.05 on Brush main, 0 on v0.3.0 | Brush perceptual loss (Brush's own: 0). v0.3.0's LPIPS loss aborts on Metal (`BufferTooBig`, a 28 GB buffer) for images over ~256 px, so it is off unless you pass a value |
 | `recon --opac-loss-weight` | 1e-9 | Brush opacity regulariser (v0.3.0 only; Brush main has none) |
 | `recon --scale-loss-weight` | 1e-8 | Brush scale regulariser (v0.3.0 only) |
 | `recon --sky` | `alpha` | `alpha`: sky transparent in training; `ignore`: masked out; `off`: trained like the rest |
@@ -114,8 +114,9 @@ middle ground.
 
 ### Brush from source
 
-`otrv setup-brush --from-source` needs Rust's cargo (https://rustup.rs) and builds brush-app at the
-pinned main commit (in `tsplat/brush.py`) into `~/.local/opt/brush/src`. Brush main renamed
+`otrv setup-brush --from-source` needs Rust's cargo (https://rustup.rs), Rust 1.98+ for the pinned
+commit's burn/cubecl dependencies (`rustup update stable`; it checks first), and builds brush-app at
+the pinned main commit (in `tsplat/brush.py`) into `~/.local/opt/brush/src`. Brush main renamed
 `--total-steps` to `--total-train-iters` and replaced the opacity/scale loss weights with its own
 regularisers; `recon` reads the installed Brush's `--help` and translates or drops (with a note) the
 flags it passes, so the same command works on both. The card's header shows which Brush ran.
@@ -135,13 +136,14 @@ otrv bench $N --note "v1 control (fps 3)"
 
 1. `prep --fps 6` (re-prep, full SfM): the coverage lever; watch registration and SfM time.
 2. `--sky alpha`: removes the sky dome haze; cheap.
-3. `--lpips-loss-weight 0.05`: LPIPS and the road band should improve; watch train time.
-4. `--max-splats 3000000`: on 16 GB this is as much about memory/time as quality.
-5. `--color-norm`: per-camera PSNR on the repeaters and back.
-6. `--dense-init` (`uv sync --extra quality`): road band and far geometry.
-7. `--opac-loss-weight 1e-7` (1e-6 collapsed the smoke scene).
-8. `--prune --dehaze` (default on): no retraining, `otrv clean $N` then bench; judge on floaters and
+3. `--max-splats 3000000`: on 16 GB this is as much about memory/time as quality.
+4. `--color-norm`: per-camera PSNR on the repeaters and back.
+5. `--dense-init` (`uv sync --extra quality`): road band and far geometry.
+6. `--opac-loss-weight 1e-7` (1e-6 collapsed the smoke scene).
+7. `--prune --dehaze` (default on): no retraining, `otrv clean $N` then bench; judge on floaters and
    haze, and by eye in `otrv view`.
-9. Brush main: `otrv setup-brush --from-source`, then `BRUSH=... $R <winning flags>` vs v0.3.0.
+8. Brush main: `otrv setup-brush --from-source`, then `BRUSH=... $R <winning flags>` vs v0.3.0
+   (it drops the opacity/scale loss weights, so compare at the winning config).
+9. On Brush main: `--lpips-loss-weight 0.05` (its default there) vs 0. Not on v0.3.0: it aborts.
 
-Steps 2-7 and 9 are `--skip-sfm` runs (~75 min each); step 1 adds SfM; step 8 takes seconds.
+Steps 2-6, 8 and 9 are `--skip-sfm` runs (~75 min each); step 1 adds SfM; step 7 takes seconds.

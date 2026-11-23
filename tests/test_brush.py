@@ -149,11 +149,13 @@ def test_from_source_without_cargo_explains_and_runs_nothing(tmp_path):
 class FakeRun:
     """Records commands; `rev-parse` answers with `head`; `cargo build` drops a fake binary."""
 
-    def __init__(self, install_dir, head=brush.SOURCE_COMMIT):
-        self.cmds, self.install_dir, self.head = [], install_dir, head
+    def __init__(self, install_dir, head=brush.SOURCE_COMMIT, rustc="rustc 1.103.0 (abc 2026-11-01)"):
+        self.cmds, self.install_dir, self.head, self.rustc = [], install_dir, head, rustc
 
     def __call__(self, cmd, check=False, capture_output=False, text=False, cwd=None):
         self.cmds.append((cmd, cwd))
+        if cmd[0] == "rustc":
+            return type("R", (), {"stdout": self.rustc + "\n", "returncode": 0})()
         if "init" in cmd:
             (brush.source_dir(self.install_dir) / ".git").mkdir()
         if cmd[:2] == ["cargo", "build"]:
@@ -173,6 +175,13 @@ def test_from_source_fetches_the_pinned_commit_and_builds_brush_app(tmp_path):
     build = [(c, cwd) for c, cwd in run.cmds if c[0] == "cargo"]
     assert build == [(["cargo", "build", "--release", "-p", "brush-app"], brush.source_dir(tmp_path))]
     assert len(brush.SOURCE_COMMIT) == 40  # a full SHA, not a branch name
+
+
+def test_from_source_with_old_rust_says_rustup_update_before_fetching(tmp_path):
+    run = FakeRun(tmp_path, rustc="rustc 1.91.0 (f8297e351 2025-10-28)")
+    with pytest.raises(SystemExit, match=r"needs Rust 1\.98\+.*1\.91.*rustup update stable"):
+        brush.setup_from_source(tmp_path, run=run, which=lambda name: name)
+    assert [c[0] for c, _ in run.cmds] == ["rustc"]
 
 
 def test_from_source_refuses_a_different_commit(tmp_path):

@@ -83,3 +83,19 @@ def test_max_splats_default_follows_ram(monkeypatch):
     assert cli.default_max_splats() == 6_000_000
     monkeypatch.setattr(cli.doctor, "ram_gb", lambda: None)
     assert cli.default_max_splats() == 3_000_000
+
+
+def test_lpips_default_depends_on_the_brush():
+    assert cli.lpips_weight(None, (1, 0, 0)) == 0.05  # Brush main (source build)
+    assert cli.lpips_weight(None, (0, 3, 0)) == 0.0  # v0.3.0's LPIPS loss aborts on Metal
+    assert cli.lpips_weight(None, None) == 0.0
+    assert cli.lpips_weight(0.2, (0, 3, 0)) == 0.2  # an explicit value always wins
+
+
+def test_default_lpips_reaches_brush_and_recon_args(stubbed, monkeypatch):
+    work, calls = stubbed
+    monkeypatch.setattr(cli.brush, "version", lambda exe: (1, 0, 0))
+    cli.main(["recon", "r"])
+    extra = calls["train"]["extra"]
+    assert extra[extra.index("--lpips-loss-weight") + 1] == "0.05"
+    assert json.loads((work / "recon_args.json").read_text())["lpips_loss_weight"] == 0.05

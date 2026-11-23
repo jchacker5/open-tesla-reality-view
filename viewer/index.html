@@ -196,8 +196,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
-import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { buildCar, DIMS } from "./car.js";
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
@@ -342,244 +341,22 @@ const egoHole = new THREE.Group();
 scene.add(egoHole);
 
 // ---- ego car ----
-// An ORIGINAL stylised white crossover with Model Y-like proportions (4.75 m long, 1.92 m wide,
-// 1.62 m tall, 2.89 m wheelbase), built entirely in code: no downloaded models, no logos, no copied
-// design details. Car local axes: +z forward, +y up, +x = the car's left side; units are metres.
-// Construction: side-profile shapes are extruded across the width, tessellated, bent with a
-// tumblehome / plan-view rounding field, then given creased normals (smooth panels, crisp edges).
-// Trim pieces (glass, cladding, lamps) are "shells" extruded from the same profile a few mm proud of
-// the paint, so they always follow the body surface.
-const CAR = { W: 1.92, bevel: 0.06, wheelR: 0.355, wheelZ: 1.445, track: 0.82, camZ: 0.8 };
-const v2 = ([x, y]) => new THREE.Vector2(x, y);
-const tumble = (y) => 1 - 0.24 * Math.min(1, Math.max(0, (y - 0.95) / 0.7)) ** 1.4;
-const planRound = (z) => { const e = Math.max(0, (Math.abs(z) - 1.72) / 0.7); return 1 - 0.2 * e * e; };
-const skirt = (y) => (y < 0.4 ? 1 - 0.06 * (0.4 - y) / 0.16 : 1);
-// body outline above the floor, front bumper -> over the roof -> down the tail (x forward, y up)
-const UPPER = new THREE.SplineCurve([[2.12, 0.26], [2.31, 0.34], [2.37, 0.5], [2.34, 0.65], [2.22, 0.75], [1.65, 0.85],
-  [1.08, 0.95], [0.3, 1.47], [-0.4, 1.585], [-1.2, 1.54], [-1.78, 1.31], [-2.14, 1.11], [-2.29, 1.04], [-2.36, 0.8],
-  [-2.35, 0.48], [-2.25, 0.28]].map(v2)).getSpacedPoints(200);
-const nearestIdx = (x, y) => UPPER.reduce((best, p, i) => (p.distanceTo(v2([x, y])) < UPPER[best].distanceTo(v2([x, y])) ? i : best), 0);
-// outward offset of a run of UPPER (which runs counter-clockwise around the profile)
-function offsetRun(i0, i1, d) {
-  const out = [];
-  for (let i = i0; i <= i1; i++) {
-    const a = UPPER[Math.max(0, i - 1)], b = UPPER[Math.min(UPPER.length - 1, i + 1)];
-    const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx, dy) || 1;
-    out.push(new THREE.Vector2(UPPER[i].x + (dy / l) * d, UPPER[i].y - (dx / l) * d));
-  }
-  return out;
-}
-// Crack-free refinement: split every edge whose extent in the (y, z) profile plane exceeds maxLen at
-// its midpoint. The decision depends only on the edge, so both neighbouring triangles agree and no
-// T-junctions appear. Edges running across the width stay long: the bend below is linear in x.
-function refine(positions, maxLen, maxX = Infinity) {
-  let src = positions;
-  for (let iter = 0; iter < 10; iter++) {
-    const out = [];
-    let split = 0;
-    const long = (a, b) => Math.hypot(src[a + 1] - src[b + 1], src[a + 2] - src[b + 2]) > maxLen || Math.abs(src[a] - src[b]) > maxX;
-    const mid = (a, b) => [(src[a] + src[b]) / 2, (src[a + 1] + src[b + 1]) / 2, (src[a + 2] + src[b + 2]) / 2];
-    const P = (i) => [src[i], src[i + 1], src[i + 2]];
-    for (let i = 0; i < src.length; i += 9) {
-      let [a, b, c] = [i, i + 3, i + 6];
-      let ab = long(a, b), bc = long(b, c), ca = long(c, a);
-      const n = ab + bc + ca;
-      if (!n) { out.push(...P(a), ...P(b), ...P(c)); continue; }
-      split++;
-      // rotate so the marked edges come first in a fixed pattern
-      while ((n === 1 && !ab) || (n === 2 && !(ab && bc))) { [a, b, c] = [b, c, a]; [ab, bc, ca] = [bc, ca, ab]; }
-      if (n === 1) { const m = mid(a, b); out.push(...P(a), ...m, ...P(c), ...m, ...P(b), ...P(c)); }
-      else if (n === 2) { const m1 = mid(a, b), m2 = mid(b, c); out.push(...m1, ...P(b), ...m2, ...P(a), ...m1, ...m2, ...P(a), ...m2, ...P(c)); }
-      else { const m1 = mid(a, b), m2 = mid(b, c), m3 = mid(c, a); out.push(...P(a), ...m1, ...m3, ...m1, ...P(b), ...m2, ...m3, ...m2, ...P(c), ...m1, ...m2, ...m3); }
-    }
-    src = out;
-    if (!split) break;
-  }
-  return src;
-}
-function extrude(shape, width, { bevel = 0.012, segs = 3, tess = 0.1, keep = null } = {}) {
-  let g = new THREE.ExtrudeGeometry(shape, { depth: width - 2 * bevel, bevelEnabled: bevel > 0, bevelThickness: bevel,
-    bevelSize: bevel, bevelSegments: segs, curveSegments: 24, steps: 1 });
-  g.translate(0, 0, -(width - 2 * bevel) / 2);
-  g.rotateY(-Math.PI / 2); // profile x (length) -> +z forward, extrusion -> x (width)
-  const refined = refine(Array.from(g.attributes.position.array), tess, keep ? 0.05 : Infinity);
-  g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(refined, 3));
-  const pos = g.attributes.position;
-  for (let i = 0; i < pos.count; i++) {
-    const y = pos.getY(i), z = pos.getZ(i);
-    pos.setX(i, pos.getX(i) * tumble(y) * planRound(z) * skirt(y));
-  }
-  if (keep) { // drop triangles whose centroid fails keep(x, y, z)
-    const src = pos.array, out = [];
-    for (let i = 0; i < src.length; i += 9) {
-      if (keep((src[i] + src[i + 3] + src[i + 6]) / 3, (src[i + 1] + src[i + 4] + src[i + 7]) / 3, (src[i + 2] + src[i + 5] + src[i + 8]) / 3))
-        for (let k = 0; k < 9; k++) out.push(src[i + k]);
-    }
-    g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(out, 3));
-  }
-  g.deleteAttribute("normal");
-  return toCreasedNormals(g, THREE.MathUtils.degToRad(30));
-}
-const mats = {
-  paint: new THREE.MeshPhysicalMaterial({ color: 0xf3f4f6, roughness: 0.3, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05 }),
-  glass: new THREE.MeshPhysicalMaterial({ color: 0x07090c, roughness: 0.12, metalness: 0.25, clearcoat: 1, clearcoatRoughness: 0.12 }),
-  trim: new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.72 }),
-  well: new THREE.MeshBasicMaterial({ color: 0x050505 }),
-  tyre: new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.92 }),
-  rim: new THREE.MeshStandardMaterial({ color: 0x5a5f67, metalness: 0.75, roughness: 0.32 }),
-  rimDark: new THREE.MeshStandardMaterial({ color: 0x1d2024, metalness: 0.5, roughness: 0.5 }),
-  // lamps skip tone mapping so lit lamps stay saturated (AgX would wash bright red out to pink)
-  tail: new THREE.MeshStandardMaterial({ color: 0x1c0204, emissive: 0xff0a14, emissiveIntensity: 0.5, roughness: 0.55, toneMapped: false }),
-  lens: new THREE.MeshPhysicalMaterial({ color: 0x0b0d11, roughness: 0.08, metalness: 0.2, clearcoat: 1 }),
-  drl: new THREE.MeshBasicMaterial({ color: 0xeef4ff, toneMapped: false }),
-  amberF: new THREE.MeshStandardMaterial({ color: 0x121317, emissive: 0xff9a10, emissiveIntensity: 0, roughness: 0.2, toneMapped: false }),
-  amberR: new THREE.MeshStandardMaterial({ color: 0x1c0605, emissive: 0xff9a10, emissiveIntensity: 0, roughness: 0.2, toneMapped: false }),
-};
+// The built-in car lives in ./car.js (an original lofted crossover at Model Y dimensions). A user
+// model (models/car.json + .glb/.gltf, see loadUserCar below) can replace its body at runtime; both
+// expose the same small API, so lamps, steering and wheel spin keep working.
+const CAR = { camZ: 0.8, wheelZ: DIMS.wheelbase / 2, wheelR: DIMS.wheelR };
+let carApi = buildCar(THREE);
 const car = new THREE.Group();
-const carBody = new THREE.Group(); // pitch/roll applied here (drive mode); wheels stay on the ground
-car.add(carBody);
-{
-  const { W, bevel, wheelR, wheelZ } = CAR;
-  // painted body with real wheel-arch openings
-  const R = 0.48, a = Math.asin((0.26 - wheelR) / R);
-  const body = new THREE.Shape();
-  body.moveTo(-2.2, 0.26);
-  for (const xc of [-wheelZ, wheelZ]) { body.lineTo(xc - R * Math.cos(a), 0.26); body.absarc(xc, wheelR, R, Math.PI - a, a, true); }
-  body.lineTo(2.12, 0.26);
-  for (const p of UPPER.slice(1)) body.lineTo(p.x, p.y);
-  carBody.add(new THREE.Mesh(extrude(body, W, { bevel, segs: 5, tess: 0.12 }), mats.paint));
-
-  // glass canopy: windscreen, glass roof and rear glass in one piece; narrower than the roof so
-  // painted roof rails and A-pillars frame it
-  const g0 = nearestIdx(1.08, 0.95), g1 = nearestIdx(-2.12, 1.12);
-  const canopy = new THREE.Shape([...offsetRun(g0, g1, bevel + 0.012 - 0.006), ...offsetRun(g0, g1, bevel - 0.08).reverse()]);
-  carBody.add(new THREE.Mesh(extrude(canopy, W - 0.26, { bevel: 0.006, segs: 2, tess: 0.15 }), mats.glass));
-
-  // side windows (daylight opening): a glass band slightly wider than the body at window height
-  const dlo = new THREE.SplineCurve([[0.92, 1.0], [0.55, 1.22], [0.22, 1.42], [-0.4, 1.5], [-1.15, 1.46], [-1.55, 1.3],
-    [-1.72, 1.12], [-1.7, 1.05], [-1.2, 1.03], [0.2, 1.01], [0.92, 1.0]].map(v2)).getSpacedPoints(80);
-  carBody.add(new THREE.Mesh(extrude(new THREE.Shape(dlo), W + 0.03, { bevel: 0.008, segs: 2, tess: 0.15 }), mats.glass));
-
-  // black lower cladding all round + flared wheel-arch trims, as one shell
-  const Ri = 0.435, Ro = 0.54, a1 = Math.asin((0.2 - wheelR) / Ri), a2 = Math.asin((0.42 - wheelR) / Ro);
-  const front = UPPER.findIndex((p) => p.y > 0.42), rear = UPPER.findLastIndex((p) => p.y > 0.42);
-  const clad = new THREE.Shape();
-  clad.moveTo(-2.18, 0.2);
-  for (const xc of [-wheelZ, wheelZ]) { clad.lineTo(xc - Ri * Math.cos(a1), 0.2); clad.absarc(xc, wheelR, Ri, Math.PI - a1, a1, true); }
-  clad.lineTo(2.12, 0.2);
-  for (const p of offsetRun(0, front, bevel + 0.01 - 0.012)) clad.lineTo(p.x, p.y);
-  for (const xc of [wheelZ, -wheelZ]) { clad.lineTo(xc + Ro * Math.cos(a2), 0.42); clad.absarc(xc, wheelR, Ro, a2, Math.PI - a2, false); }
-  for (const p of offsetRun(rear, UPPER.length - 1, bevel + 0.01 - 0.012)) clad.lineTo(p.x, p.y);
-  carBody.add(new THREE.Mesh(extrude(clad, W + 0.02, { bevel: 0.012, segs: 3, tess: 0.1 }), mats.trim));
-  for (const z of [wheelZ, -wheelZ]) { // dark wheel wells so the arches don't show the sky through the car
-    const well = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.5, 0.98), mats.well);
-    well.position.set(0, 0.56, z);
-    carBody.add(well);
-  }
-
-  // tail lamps wrap the rear corners (within the body width); amber signal segment below them
-  const tailI0 = nearestIdx(-2.33, 1.06), tailI1 = nearestIdx(-2.36, 0.95);
-  const tailRun = offsetRun(tailI0, tailI1, bevel + 0.004 - 0.004);
-  const tailShape = new THREE.Shape([...tailRun, v2([-1.98, tailRun.at(-1).y]), v2([-2.04, tailRun[0].y])]);
-  carBody.add(new THREE.Mesh(extrude(tailShape, W + 0.008, { bevel: 0.004, segs: 1, tess: 0.05, keep: (x) => Math.abs(x) > 0.36 }), mats.tail));
-  const ambI0 = nearestIdx(-2.36, 0.935), ambI1 = nearestIdx(-2.36, 0.89);
-  const ambRun = offsetRun(ambI0, ambI1, bevel + 0.004 - 0.004);
-  const ambShape = new THREE.Shape([...ambRun, v2([-2.1, ambRun.at(-1).y]), v2([-2.1, ambRun[0].y])]);
-  const ambR = extrude(ambShape, W + 0.008, { bevel: 0.004, segs: 1, tess: 0.05, keep: (x) => Math.abs(x) > 0.5 });
-  // head lamps: slim, swept back along the bumper/hood shoulder; amber segment on the outer corner
-  const hI0 = nearestIdx(2.33, 0.645), hI1 = nearestIdx(2.27, 0.715);
-  const hRun = offsetRun(hI0, hI1, bevel + 0.004 - 0.004);
-  const hShape = new THREE.Shape([...hRun, v2([1.92, hRun.at(-1).y - 0.01]), v2([1.98, hRun[0].y - 0.03])]);
-  carBody.add(new THREE.Mesh(extrude(hShape, W + 0.008, { bevel: 0.004, segs: 1, tess: 0.05, keep: (x) => Math.abs(x) > 0.34 && Math.abs(x) < 0.84 }), mats.lens));
-  // daytime running light: a thin bright line along the top of each lamp
-  const dI0 = nearestIdx(2.3, 0.69), dI1 = nearestIdx(2.28, 0.705);
-  const dRun = offsetRun(dI0, dI1, bevel + 0.008 - 0.003);
-  const dShape = new THREE.Shape([...dRun, v2([1.95, dRun.at(-1).y - 0.012]), v2([1.96, dRun[0].y - 0.016])]);
-  carBody.add(new THREE.Mesh(extrude(dShape, W + 0.016, { bevel: 0.003, segs: 1, tess: 0.05, keep: (x) => Math.abs(x) > 0.36 && Math.abs(x) < 0.82 }), mats.drl));
-  const ambF = extrude(hShape, W + 0.01, { bevel: 0.004, segs: 1, tess: 0.05, keep: (x) => Math.abs(x) >= 0.84 });
-  // split the amber shells into left (+x) / right (-x) meshes so each blinker flashes on its own
-  const halves = (geo, keepLeft) => {
-    const src = geo.attributes.position.array, nrm = geo.attributes.normal.array, p = [], n = [];
-    for (let i = 0; i < src.length; i += 9) if ((src[i] + src[i + 3] + src[i + 6] > 0) === keepLeft) for (let k = 0; k < 9; k++) { p.push(src[i + k]); n.push(nrm[i + k]); }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(p, 3));
-    g.setAttribute("normal", new THREE.Float32BufferAttribute(n, 3));
-    return g;
-  };
-  car.userData.blinkers = { L: [], R: [] };
-  for (const [geo, mat] of [[ambF, mats.amberF], [ambR, mats.amberR]]) for (const left of [true, false]) {
-    const m = new THREE.Mesh(halves(geo, left), mat.clone());
-    carBody.add(m);
-    car.userData.blinkers[left ? "L" : "R"].push(m.material);
-  }
-  // high-mounted stop lamp under the rear glass edge (only glows when braking)
-  const chmsl = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.018, 0.02), mats.tail.clone());
-  chmsl.position.set(0, 1.09, -2.16);
-  chmsl.material.emissiveIntensity = 0;
-  carBody.add(chmsl);
-  car.userData.chmsl = chmsl.material;
-
-  // door mirrors
-  for (const s of [1, -1]) {
-    const m = new THREE.Mesh(new RoundedBoxGeometry(0.1, 0.12, 0.22, 3, 0.04), mats.paint);
-    m.position.set(s * 1.02, 1.03, 0.86);
-    m.rotation.y = s * -0.12;
-    const stalk = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.04, 0.08), mats.trim);
-    stalk.position.set(s * 0.95, 1.0, 0.88);
-    carBody.add(m, stalk);
-  }
-}
-// wheels: rounded tyre (lathe) + aero cover with turbine slots; front pair steers, all spin
-function makeWheel(side) {
-  const r = CAR.wheelR, w = 0.255;
-  const prof = [];
-  for (let i = 0; i <= 12; i++) { const t = (i / 12) * Math.PI; prof.push(new THREE.Vector2(r - 0.05 + 0.05 * Math.sin(t), -w / 2 + (w / 2) * (1 - Math.cos(t)))); }
-  prof.unshift(new THREE.Vector2(0.24, -w / 2 + 0.01)); prof.push(new THREE.Vector2(0.24, w / 2 - 0.01));
-  const tyre = new THREE.Mesh(new THREE.LatheGeometry(prof, 40), mats.tyre);
-  tyre.rotation.z = Math.PI / 2;
-  const spin = new THREE.Group();
-  spin.add(tyre);
-  const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.245, 0.25, 0.02, 40), mats.rim);
-  disc.rotation.z = Math.PI / 2;
-  disc.position.x = side * (w / 2 - 0.02);
-  spin.add(disc);
-  for (let k = 0; k < 5; k++) {
-    const slot = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.05, 0.14), mats.rimDark);
-    const ang = (k / 5) * Math.PI * 2;
-    slot.position.set(side * (w / 2 - 0.006), Math.sin(ang) * 0.16, Math.cos(ang) * 0.16);
-    slot.rotation.x = -ang;
-    spin.add(slot);
-  }
-  const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.03, 20), mats.rimDark);
-  hub.rotation.z = Math.PI / 2;
-  hub.position.x = side * (w / 2 - 0.01);
-  spin.add(hub);
-  const pivot = new THREE.Group();
-  pivot.add(spin);
-  pivot.userData.spin = spin;
-  return pivot;
-}
-car.userData.wheels = [];
-car.userData.frontWheels = [];
-for (const z of [CAR.wheelZ, -CAR.wheelZ]) for (const s of [1, -1]) {
-  const wheel = makeWheel(s);
-  wheel.position.set(s * CAR.track, CAR.wheelR, z);
-  car.add(wheel);
-  car.userData.wheels.push(wheel);
-  if (z > 0) car.userData.frontWheels.push(wheel);
-}
+let carBody = carApi.body;
+car.add(carApi.group);
 // lamp state from telemetry (or drive mode): brake brightens the tail lamps, blinkers flash amber at
 // ~1.5 Hz from the given clock (deterministic for the render mode), front wheels steer.
 function setCarSignals({ brake = false, blinkL = false, blinkR = false, steer = 0, t = 0, spin = null }) {
   const on = (t * 1.5) % 1 < 0.55;
-  mats.tail.emissiveIntensity = brake ? 1.6 : 0.5;
-  car.userData.chmsl.emissiveIntensity = brake ? 1.6 : 0;
-  for (const m of car.userData.blinkers.L) m.emissiveIntensity = blinkL && on ? 1.5 : 0;
-  for (const m of car.userData.blinkers.R) m.emissiveIntensity = blinkR && on ? 1.5 : 0;
-  for (const w of car.userData.frontWheels) w.rotation.y = steer;
-  if (spin != null) for (const w of car.userData.wheels) w.userData.spin.rotation.x = spin;
+  carApi.setBrake(brake);
+  carApi.setBlink(blinkL && on, blinkR && on);
+  carApi.setSteer(steer);
+  if (spin != null) carApi.setWheelSpin(spin);
 }
 // soft contact shadow: blurred rounded-rect gradient on a plane ~1 cm above the road
 function shadowTexture() {
@@ -1271,7 +1048,7 @@ const beams = (() => {
   car.add(m);
   return m;
 })();
-function setHeadlights(on) { drive.headlights = on; beams.visible = on; mats.drl.color.setScalar(on ? 1.25 : 0.93); }
+function setHeadlights(on) { drive.headlights = on; beams.visible = on; carApi.setHeadlights(on); }
 
 // ---- input: keyboard (smoothed to analog), gamepad (standard mapping only), touch ----
 const keys = new Set();

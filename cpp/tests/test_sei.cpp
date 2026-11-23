@@ -79,8 +79,8 @@ Bytes add_epb(const Bytes& data) {
 }
 
 Bytes sei_nal(const Bytes& payload) {
-  Bytes body(16, 0x42);
-  body.push_back(0x69);
+  Bytes body(17, 0x42);  // UUID padding, then Tesla's 0x69 marker
+  body[16] = 0x69;
   append(body, add_epb(payload));
   Bytes nal{0x06, 0x05, static_cast<std::uint8_t>(std::min<std::size_t>(body.size(), 255))};
   append(nal, body);

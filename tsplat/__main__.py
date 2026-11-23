@@ -11,6 +11,7 @@ otrv recon drive1                          COLMAP -> Brush training -> chase pat
 otrv clean drive1                          re-run the post-train prune + dehaze with other thresholds
 otrv collision drive1                      re-bake drive mode's ground + wall grids (recon does it too)
 otrv view drive1                           open the replay viewer
+otrv render drive1                         cinematic MP4 of the replay (optional AI clean-up)
 otrv studio                                the same steps as a local web app (needs `uv sync --extra studio`)
 """
 
@@ -38,10 +39,12 @@ from . import (
     colornorm,
     densify,
     doctor,
+    enhance,
     holdout,
     ingest,
     prep,
     recon,
+    render,
     serve,
     sky,
     speed,
@@ -389,6 +392,54 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--port", type=int, default=8765, help="local port")
 
     a = cmd(
+        "render",
+        "render the replay to an MP4 (headless Chromium; needs `uv sync --extra render` and "
+        "`uv run playwright install chromium`). Optional NVIDIA Difix clean-up: see docs/RENDER.md",
+    )
+    a.add_argument("name", help="run name")
+    a.add_argument("--out", help="output MP4 (default: work/<name>/render.mp4)")
+    a.add_argument("--fps", type=float, default=30, help="output frames per second")
+    a.add_argument("--size", help="WxH in pixels, even (default: from --aspect: 1920x1080, 1080x1920, 1080x1080)")
+    a.add_argument("--aspect", choices=list(render.ASPECT_SIZES), help="16:9 hero, 9:16 vertical, 1:1 loop")
+    a.add_argument("--cam", choices=render.CAMS, default="chase", help="camera")
+    a.add_argument("--start", type=float, default=0.0, help="start time in seconds (replay time)")
+    a.add_argument("--end", type=float, help="end time in seconds (default: end of the replay)")
+    a.add_argument(
+        "--enhance",
+        choices=enhance.MODES,
+        default="none",
+        help="AI clean-up with NVIDIA Difix (non-commercial license; needs `uv sync --extra enhance`): "
+        "difix ~6 s/frame, difix-ref (guided by the nearest real front-camera frame) ~40 s/frame on an M4",
+    )
+    a.add_argument(
+        "--stabilize",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="flow-guided blend with the previous enhanced frame to cut flicker (default: on with --enhance)",
+    )
+    a.add_argument("--stabilize-strength", type=float, default=0.3, help="weight of the previous frame, 0-1")
+    a.add_argument("--no-label", action="store_true", help='omit the "AI-enhanced" corner label')
+    cache = a.add_mutually_exclusive_group()
+    cache.add_argument(
+        "--keep-frames", action="store_true", help="keep every per-frame PNG in work/<name>/render/ (raw and enhanced)"
+    )
+    cache.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="also delete the enhanced frames after encoding (kept by default, so a re-run skips Difix)",
+    )
+    a.add_argument(
+        "--accept-nvidia-license", action="store_true", help=f"accept Difix's license (or env {enhance.LICENSE_ENV}=1)"
+    )
+    a.add_argument("--headed", action="store_true", help="show the browser window (if headless gets no GPU)")
+    a.add_argument(
+        "--swiftshader",
+        action="store_true",
+        help="software WebGL for machines without a GPU, e.g. CI (env OTRV_RENDER_SWIFTSHADER=1); slow",
+    )
+    a.add_argument("--viewer", dest="viewer_html", help=argparse.SUPPRESS)  # dev: render with another viewer page
+
+    a = cmd(
         "studio",
         "local web app: pick footage, see drives, choose a window, build and open cities "
         "(needs `uv sync --extra studio`; 127.0.0.1 only)",
@@ -593,6 +644,33 @@ def cmd_view(args) -> None:
         srv.serve_forever()
 
 
+def cmd_render(args) -> None:
+    work = need_recon(args.name, "viewer/scene.ply", "viewer/path.json")
+    size, aspect = render.resolve_size(args.size, args.aspect)
+    if not 0 <= args.stabilize_strength <= 1:
+        raise SystemExit("--stabilize-strength must be between 0 and 1")
+    page = Path(args.viewer_html).read_bytes() if args.viewer_html else viewer_html().read_bytes()
+    opts = render.Options(
+        out=Path(args.out) if args.out else work / "render.mp4",
+        fps=args.fps,
+        size=size,
+        aspect=aspect,
+        cam=args.cam,
+        start=args.start,
+        end=args.end,
+        enhance=args.enhance,
+        stabilize=args.enhance != "none" if args.stabilize is None else args.stabilize,
+        stabilize_strength=args.stabilize_strength,
+        label=not args.no_label,
+        keep_frames=args.keep_frames,
+        clean_cache=args.clean_cache,
+        headed=args.headed,
+        swiftshader=args.swiftshader or render.env_swiftshader(),
+        accept_license=args.accept_nvidia_license,
+    )
+    render.run(work, page, opts)
+
+
 def cmd_studio(args) -> None:
     try:
         from .studio import server
@@ -669,6 +747,8 @@ def dispatch(args) -> None:
         recon.export_nvs(WORK / args.name, args.fps)
     elif c == "view":
         cmd_view(args)
+    elif c == "render":
+        cmd_render(args)
     elif c == "studio":
         cmd_studio(args)
 

@@ -11,8 +11,10 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from scipy.spatial import cKDTree
 
 from . import brush
+from .splats import CAM_HEIGHT_M
 
 
 def sh(*args: str) -> None:
@@ -111,32 +113,9 @@ def undistort(work: Path, model: Path) -> Path:
         "--output_type",
         "COLMAP",
     )
-    stage, tmp = work / "_maskimgs", work / "_maskdense"
-    for d in (stage, tmp):
-        shutil.rmtree(d, ignore_errors=True)
-    for m in (work / "masks").rglob("*.jpg.png"):
-        out = stage / m.parent.name / m.name[:-4]
-        out.parent.mkdir(parents=True, exist_ok=True)
-        Image.open(m).convert("RGB").save(out, quality=100)
-    sh(
-        "colmap",
-        "image_undistorter",
-        "--image_path",
-        str(stage),
-        "--input_path",
-        str(model),
-        "--output_path",
-        str(tmp),
-        "--output_type",
-        "COLMAP",
-    )
-    md = dense / "images" / "masks"
-    md.mkdir(parents=True, exist_ok=True)
-    for f in (tmp / "images").rglob("*.jpg"):
-        a = np.asarray(Image.open(f).convert("L"))
-        Image.fromarray(np.where(a > 127, 255, 0).astype(np.uint8)).save(md / f"{f.parent.name}_{f.stem}.png")
-    shutil.rmtree(stage)
-    shutil.rmtree(tmp)
+    _undistort_masks(work, model, work / "masks", dense / "images" / "masks")
+    if (work / "sky").is_dir():  # bench scores without sky; `recon --sky` decides how Brush sees it
+        _undistort_masks(work, model, work / "sky", dense / "sky")
 
     for f in list((dense / "images").glob("*/*.jpg")):
         if f.parent.name != "masks":
@@ -162,6 +141,55 @@ def undistort(work: Path, model: Path) -> Path:
     return dense
 
 
+def snapshot_dense(work: Path) -> None:
+    """Keep the pristine undistorted dataset in dense_base/ so the training-time levers (sky, colour
+    normalisation, dense init), which edit dense/ in place, start from it on every `recon --skip-sfm`."""
+    base = work / "dense_base"
+    shutil.rmtree(base, ignore_errors=True)
+    shutil.copytree(work / "dense", base, ignore=shutil.ignore_patterns("stereo", "*.sh"))
+
+
+def restore_dense(work: Path) -> Path:
+    """dense/ as undistort left it (from dense_base/; a pre-v2 dense/ is pristine and becomes the base)."""
+    dense, base = work / "dense", work / "dense_base"
+    if not base.is_dir():
+        snapshot_dense(work)
+    else:
+        shutil.rmtree(dense, ignore_errors=True)
+        shutil.copytree(base, dense)
+    return dense
+
+
+def _undistort_masks(work: Path, model: Path, src: Path, dest: Path) -> None:
+    """Undistort per-frame masks (<src>/<cam>/<frame>.jpg.png) with the images' cameras, by running
+    them through image_undistorter as images; binarised to dest/<cam>_<frame>.png."""
+    stage, tmp = work / "_maskimgs", work / "_maskdense"
+    for d in (stage, tmp):
+        shutil.rmtree(d, ignore_errors=True)
+    for m in src.rglob("*.jpg.png"):
+        out = stage / m.parent.name / m.name[:-4]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(m).convert("RGB").save(out, quality=100)
+    sh(
+        "colmap",
+        "image_undistorter",
+        "--image_path",
+        str(stage),
+        "--input_path",
+        str(model),
+        "--output_path",
+        str(tmp),
+        "--output_type",
+        "COLMAP",
+    )
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in (tmp / "images").rglob("*.jpg"):
+        a = np.asarray(Image.open(f).convert("L"))
+        Image.fromarray(np.where(a > 127, 255, 0).astype(np.uint8)).save(dest / f"{f.parent.name}_{f.stem}.png")
+    shutil.rmtree(stage)
+    shutil.rmtree(tmp)
+
+
 def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
     """Brush 0.3 fails ("early eof") on very small images. Heavy undistortion can shrink a
     camera's frames, so upscale those cameras (images, masks, intrinsics) to a safe size."""
@@ -184,9 +212,9 @@ def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
         for name in names.get(p[0], []):
             img = dense / "images" / name
             Image.open(img).resize((w, h), Image.LANCZOS).save(img, quality=95)
-            m = dense / "images" / "masks" / f"{Path(name).stem}.png"
-            if m.exists():
-                Image.open(m).resize((w, h), Image.NEAREST).save(m)
+            for m in (dense / "images" / "masks" / f"{Path(name).stem}.png", dense / "sky" / f"{Path(name).stem}.png"):
+                if m.exists():
+                    Image.open(m).resize((w, h), Image.NEAREST).save(m)
         print(f"camera {p[0]}: upscaled x{s} for Brush (small undistorted frames)")
     sp.write_text("\n".join(out) + "\n")
 
@@ -196,9 +224,19 @@ def export_every(steps: int) -> int:
     return steps // 4 if steps % 4 == 0 and steps // 4 >= 1000 else steps
 
 
-def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0) -> Path:
-    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`.
-    splat/ is emptied first so a failed run can't leave an older run's splat or eval renders behind."""
+def train(
+    work: Path,
+    dense: Path,
+    steps: int,
+    viewer: bool,
+    eval_every: int = 0,
+    extra: list[str] | tuple = (),
+    rules=None,
+) -> Path:
+    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`;
+    `extra` is passed through to Brush (e.g. --seed); `rules` (clean.Rules) prunes and dehazes the
+    result on its way to viewer/scene.ply. splat/ is emptied first so a failed run can't leave an
+    older run's splat or eval renders behind."""
     out = work / "splat"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
@@ -213,11 +251,15 @@ def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0
         str(export_every(steps)),
         "--export-name",
         "splat_{iter}.ply",
+        *extra,
     ]
     if viewer:
         args.append("--with-viewer")
     if eval_every:
         args += ["--eval-split-every", str(eval_every), "--eval-every", str(steps), "--eval-save-to-disk"]
+    args, dropped = brush.adapt_args(args, brush.cli_flags(args[0]))  # v0.3.0 flags -> this Brush's
+    if dropped:
+        print(f"note: this Brush has no {', '.join(dropped)}; training without them")
     sh(*args)
     final = out / f"splat_{steps}.ply"
     if not final.exists():
@@ -232,7 +274,14 @@ def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0
         )
     dest = work / "viewer" / "scene.ply"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(final, dest)
+    for stale in (work / "clean.json", work / "viewer" / "scene_raw.ply", dest):
+        stale.unlink(missing_ok=True)
+    if rules and (rules.prune or rules.dehaze) and (work / "viewer" / "path.json").exists():
+        from . import clean
+
+        clean.run(work, final, rules)
+    else:
+        shutil.copy2(final, dest)
     print(f"splat -> {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
     return dest
 
@@ -324,29 +373,90 @@ def export_path(work: Path, dense: Path) -> Path:
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
     scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
+    cam_h = fit_cam_height(read_points(dense), Ps, up, scale)
     out = work / "viewer" / "path.json"
-    out.write_text(
-        json.dumps(
-            {
-                "up": up.round(5).tolist(),
-                "metresPerUnit": scale,
-                "frames": path,
-                "dur": meta["dur"],
-                "cams": meta["cams"],
-                "clip": meta["clip"],
-                "timestamp": meta.get("timestamp"),
-            }
-        )
+    doc = {
+        "up": up.round(5).tolist(),
+        "metresPerUnit": scale,
+        "camHeight": round(cam_h if cam_h is not None else CAM_HEIGHT_M, 3),  # front camera above the road, m
+        "camHeightSource": "sfm" if cam_h is not None else "default",
+        "frames": path,
+        "dur": meta["dur"],
+        "cams": meta["cams"],
+        "clip": meta["clip"],
+        "timestamp": meta.get("timestamp"),
+    }
+    sky_json = work / "sky.json"
+    colours = json.loads(sky_json.read_text()).get("colours") if sky_json.exists() else None
+    if colours:  # mean real sky colour, sRGB 0-1: the viewer's background gradient
+        doc["sky"] = {"top": colours["top"], "horizon": colours["horizon"]}
+    out.write_text(json.dumps(doc))
+    print(
+        f"path: {len(path)} poses, {scale:.3f} m/unit, camera {doc['camHeight']} m above the road "
+        f"({doc['camHeightSource']}) -> {out}"
     )
-    print(f"path: {len(path)} poses, {scale:.3f} m/unit -> {out}")
     return out
+
+
+def read_points(dense: Path) -> np.ndarray:
+    """(n, 3) SfM points from dense/sparse/points3D.txt (empty if there is none)."""
+    f = dense / "sparse" / "points3D.txt"
+    if not f.exists():
+        return np.zeros((0, 3))
+    rows = [line.split()[1:4] for line in f.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    return np.array(rows, float).reshape(-1, 3)
+
+
+def fit_cam_height(
+    pts: np.ndarray, P: np.ndarray, up: np.ndarray, mpu: float, iters: int = 300, seed: int = 0
+) -> float | None:
+    """Front-camera height above the road in metres, from SfM points on the road beside the path.
+
+    Candidates are points within 4 m (horizontally) of a path pose and 0.8-2.5 m below it. RANSAC fits
+    a ribbon plane in path coordinates, drop = h + a * signed lateral offset (a = road camber or
+    camera roll), with 5 cm inliers, then least squares on the inliers. Returns h, or None (use the
+    1.4 m default) when fewer than 30 points support it or h is outside 1.0-2.2 m."""
+    if len(pts) == 0 or len(P) < 2:
+        return None
+    up = up / np.linalg.norm(up)
+    d = P[-1] - P[0]
+    fwd = d - (d @ up) * up
+    fwd /= np.linalg.norm(fwd) + 1e-12
+    right = np.cross(fwd, up)
+    H = np.stack([right, fwd], 1)
+
+    _, idx = cKDTree(P @ H).query(pts @ H)
+    rel = (pts - P[idx]) * mpu
+    lateral = rel @ right
+    lateral_abs = np.linalg.norm(rel @ H, axis=1)
+    drop = -(rel @ up)
+    cand = (lateral_abs <= 4.0) & (drop >= 0.8) & (drop <= 2.5)
+    if cand.sum() < 30:
+        return None
+    s, y = lateral[cand], drop[cand]
+    rng = np.random.default_rng(seed)
+    best, best_n = None, 0
+    for _ in range(iters):
+        i, j = rng.choice(len(s), 2, replace=False)
+        if abs(s[i] - s[j]) < 0.2:
+            continue
+        a = (y[i] - y[j]) / (s[i] - s[j])
+        h = y[i] - a * s[i]
+        n = int((np.abs(h + a * s - y) < 0.05).sum())
+        if abs(a) < 0.15 and n > best_n:
+            best, best_n = (h, a), n
+    if best is None or best_n < 30:
+        return None
+    inl = np.abs(best[0] + best[1] * s - y) < 0.05
+    h, _ = np.linalg.lstsq(np.stack([np.ones(inl.sum()), s[inl]], 1), y[inl], rcond=None)[0]
+    return float(h) if 1.0 <= h <= 2.2 else None
 
 
 def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float = 4.2, ahead_m: float = 14.0) -> Path:
     """Package posed reference frames + the chase-camera trajectory for a novel-view-synthesis model
     (e.g. ViewNeXt once its weights are public). Generic format: OpenCV camera convention
     (x right, y down, z forward), 4x4 camera-to-world matrices, pinhole intrinsics in pixels."""
-    dense = work / "dense"
+    dense = work / "dense_base" if (work / "dense_base" / "sparse").is_dir() else work / "dense"  # no placeholders
     path = json.loads((work / "viewer" / "path.json").read_text())
     up = np.array(path["up"])
     u = 1.0 / path["metresPerUnit"]
@@ -390,7 +500,7 @@ def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float =
         p = np.array([np.interp(t, ts, P[:, k]) for k in range(3)])
         f = np.array([np.interp(t, ts, F[:, k]) for k in range(3)])
         f /= np.linalg.norm(f)
-        road = p - up * 1.4 * u
+        road = p - up * path.get("camHeight", CAM_HEIGHT_M) * u
         eye = road - f * back_m * u + up * up_m * u
         z = road + f * ahead_m * u + up * 1.0 * u - eye
         z /= np.linalg.norm(z)

@@ -87,6 +87,13 @@ def test_brush_missing_not_executable_or_wrong_version(tools, monkeypatch, tmp_p
     assert not c.ok and "not found" in c.detail and "otrv setup-brush" in c.fix
 
 
+def test_brush_source_build_is_accepted(tools):
+    _, outputs, _ = tools
+    outputs["brush_app"] = "brush-cli 1.0.0\n"
+    c = doctor.check_brush()
+    assert c.ok and c.detail.startswith("1.0.0") and "source build" in c.detail
+
+
 def test_brush_that_cannot_run_suggests_quarantine_fix_on_mac(tools, monkeypatch):
     _, outputs, _ = tools
     del outputs["brush_app"]  # running it raises OSError

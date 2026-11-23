@@ -1,10 +1,18 @@
-"""Where Brush (the splat trainer) lives, and `otrv setup-brush` to download a verified release."""
+"""Where Brush (the splat trainer) lives, `otrv setup-brush` to download a verified release, and
+`otrv setup-brush --from-source` to build a pinned commit of Brush's main branch.
+
+The v0.3.0 release stays the default. Brush main (1.0.0) has the degenerate-splat fix (#479: needle and
+giant low-opacity splats), the Mip-Splatting 3D filter and fisheye cameras, but renamed or dropped some
+training flags; `adapt_args` translates recon's v0.3.0 flags for whichever Brush is installed."""
 
 from __future__ import annotations
 
 import hashlib
 import os
 import platform
+import re
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -32,6 +40,15 @@ NO_INTEL_MAC = (
     "Use an Apple-silicon Mac, or build Brush from source (https://github.com/ArthurBrussee/brush) "
     "and point BRUSH=/path/to/brush_app at it."
 )
+
+
+# `otrv setup-brush --from-source`: Brush main at this commit (2026-11-22, after the native Metal backend).
+SOURCE_REPO = "https://github.com/ArthurBrussee/brush"
+SOURCE_COMMIT = "d43bd1e6b232c4d85112bdf7ad1c317b3973915e"
+SOURCE_MIN_RUST = (1, 98)  # highest rust-version among its dependencies (cargo refuses older rustc)
+# v0.3.0 flag -> its name on Brush main. Flags the installed Brush doesn't know are dropped with a warning
+# (main replaced --opac-loss-weight/--scale-loss-weight with --opac-decay and its own regularisers).
+RENAMED_FLAGS = {"--total-steps": "--total-train-iters"}
 
 
 def _machine(machine: str) -> str:
@@ -170,3 +187,111 @@ def setup(
         exe = found
     exe.chmod(exe.stat().st_mode | 0o111)
     return exe
+
+
+# ---- Brush main, built from source -----------------------------------------------------------------
+
+
+def source_dir(install_dir: Path = INSTALL_DIR) -> Path:
+    return install_dir / "src"
+
+
+def source_exe(install_dir: Path = INSTALL_DIR) -> Path:
+    """brush-app's binary is `brush` on main (`brush_app` in the v0.3.0 release archives)."""
+    name = "brush.exe" if platform.system() == "Windows" else "brush"
+    return source_dir(install_dir) / "target" / "release" / name
+
+
+NO_CARGO = (
+    "building Brush from source needs Rust's cargo, which isn't on PATH. Install Rust from https://rustup.rs "
+    "(`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`), open a new shell and re-run "
+    "`otrv setup-brush --from-source`. Or keep the prebuilt v0.3.0 release: `otrv setup-brush`."
+)
+
+
+def setup_from_source(
+    install_dir: Path = INSTALL_DIR,
+    commit: str = SOURCE_COMMIT,
+    run=subprocess.run,
+    which=shutil.which,
+) -> Path:
+    """Fetch Brush at `commit` (a shallow fetch of that one commit) into install_dir/src and run
+    `cargo build --release -p brush-app`. The first build takes 10-20 min and a few GB of disk."""
+    if which("cargo") is None:
+        raise SystemExit(NO_CARGO)
+    if which("git") is None:
+        raise SystemExit("building Brush from source needs git (macOS: `xcode-select --install`)")
+    out = run(["rustc", "--version"], check=False, capture_output=True, text=True).stdout or ""
+    m = re.search(r"(\d+)\.(\d+)", out)
+    if m and (int(m.group(1)), int(m.group(2))) < SOURCE_MIN_RUST:
+        need = ".".join(map(str, SOURCE_MIN_RUST))
+        raise SystemExit(
+            f"Brush {commit[:12]} needs Rust {need}+ (its burn/cubecl dependencies), but rustc is "
+            f"{m.group(0)}. Run `rustup update stable`, then re-run `otrv setup-brush --from-source`."
+        )
+    src = source_dir(install_dir)
+    src.mkdir(parents=True, exist_ok=True)
+    repo = ["git", "-C", str(src)]
+    if not (src / ".git").exists():
+        run([*repo, "init", "-q"], check=True)
+        run([*repo, "remote", "add", "origin", SOURCE_REPO], check=True)
+    print(f"fetching Brush {commit[:12]} from {SOURCE_REPO}")
+    run([*repo, "fetch", "-q", "--depth", "1", "origin", commit], check=True)
+    run([*repo, "checkout", "-q", "--force", "--detach", "FETCH_HEAD"], check=True)
+    head = run([*repo, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    if head != commit:
+        raise SystemExit(f"fetched Brush {head} but the pinned commit is {commit}; refusing to build")
+    print("building Brush: cargo build --release -p brush-app (the first build takes 10-20 min)")
+    run(["cargo", "build", "--release", "-p", "brush-app"], check=True, cwd=src)
+    exe = source_exe(install_dir)
+    if not exe.exists():
+        raise SystemExit(f"cargo finished but {exe} is missing; check the build output above")
+    return exe
+
+
+# ---- one set of recon flags for either Brush -------------------------------------------------------
+
+
+def version(exe: str) -> tuple[int, int, int] | None:
+    """(major, minor, patch) from `<exe> --version` (v0.3.0: "brush-cli 0.3.0"), or None."""
+    try:
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def cli_flags(exe: str) -> set[str] | None:
+    """The long options the installed Brush accepts (from its --help), or None if it can't be asked."""
+    try:
+        r = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    flags = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", r.stdout or ""))
+    if r.returncode != 0 or not flags & {"--total-steps", "--total-train-iters"}:
+        return None  # not a Brush help page we understand
+    return flags
+
+
+def adapt_args(args: list[str], flags: set[str] | None) -> tuple[list[str], list[str]]:
+    """Translate v0.3.0-style Brush arguments for a Brush that accepts `flags`: rename (RENAMED_FLAGS)
+    and drop the options it doesn't know, with their value. Returns (args, dropped option names).
+    flags=None (Brush couldn't be asked) passes everything through unchanged."""
+    if not flags:
+        return list(args), []
+    out, dropped, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if not a.startswith("--"):
+            out.append(a)
+            i += 1
+            continue
+        has_value = i + 1 < len(args) and not args[i + 1].startswith("--")
+        name = RENAMED_FLAGS.get(a, a) if a not in flags else a
+        if name in flags:
+            out += [name, args[i + 1]] if has_value else [name]
+        else:
+            dropped.append(a)
+        i += 2 if has_value else 1
+    return out, dropped

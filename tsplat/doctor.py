@@ -110,9 +110,11 @@ def check_brush() -> Check:
         quarantine = f"xattr -d com.apple.quarantine '{p}'  (then re-run otrv doctor)"
         return Check("brush", False, f"{p} failed to run", quarantine if _system() == "Darwin" else fix)
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
-    if not m or (int(m.group(1)), int(m.group(2))) != (0, 3):
-        return Check("brush", False, f"{p} reports {out.strip()[:40]!r}; need 0.3.x", fix)
-    return Check("brush", True, f"{m.group(0)} at {p}")
+    ver = (int(m.group(1)), int(m.group(2))) if m else None
+    if ver is None or (ver != (0, 3) and ver[0] < 1):
+        return Check("brush", False, f"{p} reports {out.strip()[:40]!r}; need 0.3.x (or a 1.x source build)", fix)
+    source = " (source build: `otrv setup-brush --from-source`)" if ver[0] >= 1 else ""
+    return Check("brush", True, f"{m.group(0)} at {p}{source}")
 
 
 def check_disk(path: str | Path = ".", warn_gb: float = WARN_FREE_GB, fail_gb: float = MIN_FREE_GB) -> Check:

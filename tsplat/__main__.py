@@ -8,6 +8,8 @@ otrv suggest                               best 20 s windows of 10-40 mph drivin
 otrv egomask                               optional, once: mask your car's body (needs 8+ clips)
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
+otrv clean drive1                          re-run the post-train prune + dehaze with other thresholds
+otrv collision drive1                      re-bake drive mode's ground + wall grids (recon does it too)
 otrv view drive1                           open the replay viewer
 otrv studio                                the same steps as a local web app (needs `uv sync --extra studio`)
 """
@@ -15,7 +17,9 @@ otrv studio                                the same steps as a local web app (ne
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import errno
+import importlib.util
 import json
 import os
 import shutil
@@ -26,7 +30,22 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, doctor, ingest, prep, recon, serve, speed
+from . import (
+    bench,
+    brush,
+    clean,
+    collision,
+    colornorm,
+    densify,
+    doctor,
+    holdout,
+    ingest,
+    prep,
+    recon,
+    serve,
+    sky,
+    speed,
+)
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -97,6 +116,94 @@ def _kinds(value: str) -> tuple[str, ...]:
     return kinds
 
 
+LPIPS_LOSS_WEIGHT = 0.05  # Brush's default is 0 (off); perceptual loss sharpens texture (bench: lpips, road)
+
+
+def lpips_weight(requested: float | None, brush_version: tuple[int, int, int] | None) -> float:
+    """--lpips-loss-weight, or the default for the installed Brush: 0.05, except 0 on Brush 0.x, whose
+    LPIPS loss asks Metal for a 28 GB buffer (BufferTooBig) on images over ~256 px and aborts."""
+    if requested is not None:
+        return requested
+    return LPIPS_LOSS_WEIGHT if brush_version and brush_version[0] >= 1 else 0.0
+
+
+def default_max_splats() -> int:
+    """Brush's splat cap: 3M on a 16 GB Mac (the trainer + macOS fit), 6M with more RAM (Brush's own is 10M)."""
+    gb = doctor.ram_gb()
+    return 6_000_000 if gb is not None and gb > 16.5 else 3_000_000
+
+
+OPAC_LOSS_WEIGHT = 1e-9  # Brush default; 1e-7 is the first A/B (docs/HILL_CLIMB.md), 1e-6 collapsed the smoke scene
+SCALE_LOSS_WEIGHT = 1e-8  # Brush's default, passed explicitly so it's recorded and A/B-able
+
+
+def add_clean_args(a: argparse.ArgumentParser) -> None:
+    """Flags for the post-train clean-up (clean.Rules), shared by `recon` and `clean`."""
+    r = clean.Rules()
+    a.add_argument(
+        "--prune",
+        action=argparse.BooleanOptionalAction,
+        default=r.prune,
+        help="drop splats inside the car's swept path (1 m either side, 0.15-1.6 m up) and giant faint ones",
+    )
+    a.add_argument(
+        "--dehaze",
+        action=argparse.BooleanOptionalAction,
+        default=r.dehaze,
+        help="drop near-invisible, large translucent and needle splats and far ground fog (counts in clean.json); "
+        "off until validated on real footage",
+    )
+    a.add_argument("--min-opacity", type=float, default=r.min_opacity, help="dehaze: drop splats below this opacity")
+    a.add_argument(
+        "--translucent-scale",
+        type=float,
+        default=r.translucent_scale_m,
+        help="dehaze: metres; splats with a larger axis and opacity under --translucent-opacity go",
+    )
+    a.add_argument("--translucent-opacity", type=float, default=r.translucent_opacity, help="see --translucent-scale")
+    a.add_argument(
+        "--needle-ratio",
+        type=float,
+        default=r.needle_ratio,
+        help="dehaze: largest/middle axis above this with opacity under --needle-opacity is a needle",
+    )
+    a.add_argument("--needle-opacity", type=float, default=r.needle_opacity, help="see --needle-ratio")
+    a.add_argument(
+        "--ground-fog-m",
+        type=float,
+        default=r.ground_fog_m,
+        help="dehaze: drop splats farther than this (metres) across the path within 1 m of road height",
+    )
+    a.add_argument(
+        "--dehaze-sky",
+        action="store_true",
+        help="dehaze: also drop pale bright splats above eye level nearer than --sky-fog-m (sky painted at a "
+        "finite depth); ignored when the sky was trained transparent (--sky alpha)",
+    )
+    a.add_argument("--sky-fog-m", type=float, default=r.sky_fog_m, help="see --dehaze-sky (metres)")
+    a.add_argument("--sky-fog-saturation", type=float, default=r.sky_fog_saturation, help="see --dehaze-sky")
+    a.add_argument("--sky-fog-brightness", type=float, default=r.sky_fog_brightness, help="see --dehaze-sky")
+
+
+def clean_rules(args, sky_mode: str | None) -> clean.Rules:
+    if args.dehaze_sky and sky_mode == "alpha":
+        print("--dehaze-sky skipped: the sky was trained transparent (--sky alpha), so there is no sky fog to cut")
+    return clean.Rules(
+        prune=args.prune,
+        dehaze=args.dehaze,
+        min_opacity=args.min_opacity,
+        translucent_scale_m=args.translucent_scale,
+        translucent_opacity=args.translucent_opacity,
+        needle_ratio=args.needle_ratio,
+        needle_opacity=args.needle_opacity,
+        ground_fog_m=args.ground_fog_m,
+        sky_fog=args.dehaze_sky and sky_mode != "alpha",
+        sky_fog_m=args.sky_fog_m,
+        sky_fog_saturation=args.sky_fog_saturation,
+        sky_fog_brightness=args.sky_fog_brightness,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     default_data = os.environ.get("OTRV_DATA", DEFAULT_DATA)
     ap = argparse.ArgumentParser(prog="otrv", description=__doc__, formatter_class=Fmt)
@@ -126,6 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = cmd("setup-brush", f"download Brush v{brush.VERSION} for this platform, verify its sha256, install it")
     a.add_argument("--dir", default=str(brush.INSTALL_DIR), help="install directory")
+    a.add_argument(
+        "--from-source",
+        action="store_true",
+        help=f"instead, build Brush main at the pinned commit {brush.SOURCE_COMMIT[:12]} (needle-splat fix, "
+        "mip filter, fisheye) with cargo into <dir>/src: 10-20 min and a few GB; v0.3.0 stays the default "
+        "until you set BRUSH",
+    )
 
     a = cmd("ingest", "copy TeslaCam footage off the USB drive into the data dir and index it", data=True)
     a.add_argument(
@@ -164,13 +278,22 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--start", type=float, default=0, help="window start, in seconds into the clip")
     a.add_argument("--dur", type=float, default=20, help="window length in seconds (recon time grows with it)")
     a.add_argument(
-        "--fps", type=float, default=3, help="frames per second sampled from each camera (20 s x 3 fps x 4 cams = 240)"
+        "--fps",
+        type=float,
+        default=6,
+        help="frames per second sampled from each camera (20 s x 6 fps x 4 cams = 480); SfM time grows with it",
     )
     a.add_argument("--width", type=int, default=1280, help="max frame width in pixels for reconstruction")
     a.add_argument(
         "--mask-movers",
         action="store_true",
         help="mask cars/people with YOLO (needs `uv sync --extra movers`: ~1 GB torch download; ~0.2 s per frame)",
+    )
+    a.add_argument(
+        "--sky-model",
+        action="store_true",
+        help="segment the sky with UperNet/ADE20K instead of the brightness heuristic "
+        "(needs `uv sync --extra quality`; ~0.7 s per frame on an M4)",
     )
 
     a = cmd(
@@ -192,8 +315,66 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--live", action="store_true", help="open Brush's live training viewer window")
     a.add_argument("--skip-sfm", action="store_true", help="reuse work/<name>/dense from the last recon; retrain only")
     a.add_argument(
-        "--eval", action="store_true", help="hold out every 8th view (not trained on) so `otrv bench` can report PSNR"
+        "--eval",
+        action="store_true",
+        help="hold out every camera at fixed times (every 8/3 s; frames within 1/3 s of them aren't trained on "
+        "either) so `otrv bench` can score novel views the same way at any --fps",
     )
+    a.add_argument("--seed", type=int, default=42, help="Brush random seed (fixed, so A/B runs differ by the lever)")
+    a.add_argument(
+        "--opac-loss-weight",
+        type=float,
+        default=OPAC_LOSS_WEIGHT,
+        help="Brush opacity regulariser (Brush's own default 1e-9): higher kills translucent haze during training",
+    )
+    a.add_argument(
+        "--scale-loss-weight",
+        type=float,
+        default=SCALE_LOSS_WEIGHT,
+        help="Brush scale regulariser (Brush's own default 1e-8): higher discourages huge splats",
+    )
+    a.add_argument(
+        "--max-splats",
+        type=int,
+        default=default_max_splats(),
+        help="Brush's cap on the number of splats (default: 3M with 16 GB RAM or less, else 6M; Brush's own is 10M)",
+    )
+    a.add_argument(
+        "--lpips-loss-weight",
+        type=float,
+        help=f"Brush perceptual (LPIPS) loss weight (default: {LPIPS_LOSS_WEIGHT} with a source-built Brush 1.x; "
+        "0 with v0.3.0, whose LPIPS loss aborts on Metal for images over ~256 px; Brush's own default is 0)",
+    )
+    add_clean_args(a)
+    a.add_argument(
+        "--sky",
+        choices=sky.MODES,
+        default="alpha",
+        help="alpha: sky transparent in training (ignored in images that also need an ego/mover mask); "
+        "ignore: sky masked out; off: trained like the rest",
+    )
+    a.add_argument(
+        "--dense-init",
+        action="store_true",
+        help="seed Brush with Depth Anything V2 depth fitted to the SfM points, plus a road ribbon "
+        "(needs `uv sync --extra quality`; ~0.1 s per image on an M4)",
+    )
+    a.add_argument(
+        "--color-norm",
+        action="store_true",
+        help="match every camera's colour to the front camera (LAB mean/std over a running 4 s window)",
+    )
+
+    a = cmd("clean", "re-run the post-train clean-up (ego-path prune + dehaze) on a trained splat, no retraining")
+    a.add_argument("name", help="run name")
+    add_clean_args(a)
+
+    a = cmd(
+        "collision",
+        "bake viewer/collision.json for drive mode from the splat: ground height (0.5 m cells) and distance "
+        "to walls (0.25 m cells) within 12 m of the path (seconds; recon and clean run it too)",
+    )
+    a.add_argument("name", help="run name")
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -298,28 +479,99 @@ def cmd_recon(args) -> None:
     if args.skip_sfm and not (work / "dense" / "sparse" / "images.txt").exists():
         raise SystemExit(f"--skip-sfm needs an earlier recon's {work / 'dense'}: run `otrv recon {args.name}` first")
     doctor.preflight("recon", skip=("colmap",) if args.skip_sfm else ())
+    if args.dense_init and importlib.util.find_spec("transformers") is None:  # fail before SfM, not after
+        raise SystemExit("--dense-init needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
     (work / "recon_args.json").unlink(missing_ok=True)  # written only when this run finishes
+    (work / "eval.json").unlink(missing_ok=True)
     dense = work / "dense"
     timings_path = work / "timings.json"
     timings = json.loads(timings_path.read_text()) if args.skip_sfm and timings_path.exists() else {}
+    timings = {k: v for k, v in timings.items() if k in ("sfm", "undistort")}  # only the stages we reuse
     t0 = time.perf_counter()
     if not args.skip_sfm:
         model = recon.sfm(work, args.global_mapper, not args.no_rig)
         timings["sfm"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         dense = recon.undistort(work, model)
+        recon.snapshot_dense(work)
         timings["undistort"] = time.perf_counter() - t0
+    else:
+        dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
+    meta = json.loads((work / "meta.json").read_text())
+    names = [line.split()[9] for line in recon._image_lines(dense)[::2] if len(line.split()) >= 10]
+    split = holdout.plan(names, meta["fps"], meta["dur"]) if args.eval else holdout.Split()
+    if args.color_norm:  # before dense init, so the init points get the normalised colours
+        t0 = time.perf_counter()
+        colornorm.run(dense, json.loads((work / "meta.json").read_text())["fps"])
+        timings["color_norm"] = time.perf_counter() - t0
+    if args.dense_init:
+        t0 = time.perf_counter()
+        densify.run(work, dense, exclude=split.held)  # held-out views must not seed the splat
+        timings["dense_init"] = time.perf_counter() - t0
+    sky_counts = sky.apply(dense, args.sky, skip=split.eval)  # after the levers that read images: renames them
     t0 = time.perf_counter()
-    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0)
+    brush_args = ["--seed", str(args.seed)]
+    brush_args += [
+        "--opac-loss-weight",
+        f"{args.opac_loss_weight:g}",
+        "--scale-loss-weight",
+        f"{args.scale_loss_weight:g}",
+        "--max-splats",
+        str(args.max_splats),
+    ]
+    lpips = lpips_weight(args.lpips_loss_weight, brush.version(brush.path()))
+    brush_args += ["--lpips-loss-weight", f"{lpips:g}"]
+    rules = clean_rules(args, args.sky)
+    if args.eval:
+        holdout.apply(work, dense, split)
+    recon.train(work, dense, args.steps, args.live, holdout.BRUSH_SPLIT if args.eval else 0, brush_args, rules)
     timings["train"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    collision.run(work)
+    timings["collision"] = time.perf_counter() - t0
     timings_path.write_text(json.dumps({k: round(v, 1) for k, v in timings.items()}))
     (work / "recon_args.json").write_text(
         json.dumps(
-            {"steps": args.steps, "global_mapper": args.global_mapper, "rig": not args.no_rig, "eval": args.eval}
+            {
+                "steps": args.steps,
+                "global_mapper": args.global_mapper,
+                "rig": not args.no_rig,
+                "eval": args.eval,
+                "eval_split": "time" if args.eval else None,
+                "seed": args.seed,
+                "opac_loss_weight": args.opac_loss_weight,
+                "scale_loss_weight": args.scale_loss_weight,
+                "max_splats": args.max_splats,
+                "lpips_loss_weight": lpips,
+                "sky": args.sky,
+                "sky_counts": sky_counts,
+                "dense_init": args.dense_init,
+                "color_norm": args.color_norm,
+                "clean": dataclasses.asdict(rules),
+            }
         )
     )
     print(f"done: `otrv view {args.name}` to replay it, `otrv bench {args.name}` to score it")
+
+
+def cmd_clean(args) -> None:
+    """Re-clean from the untouched trained splat (scene_raw.ply), so runs with different rules compare."""
+    work = need_recon(args.name, "viewer/path.json")
+    recon_args_path = work / "recon_args.json"
+    rargs = json.loads(recon_args_path.read_text()) if recon_args_path.exists() else {}
+    src = work / "viewer" / "scene_raw.ply"
+    if not src.exists():
+        src = work / "splat" / f"splat_{rargs.get('steps')}.ply"
+    if not src.exists():
+        raise SystemExit(f"{args.name} has no trained splat (viewer/scene_raw.ply): run `otrv recon {args.name}` first")
+    rules = clean_rules(args, rargs.get("sky"))
+    clean.run(work, src, rules)
+    if (work / "viewer" / "path.json").exists():
+        collision.run(work)  # walls and ground follow the splats that are left
+    if rargs:  # the card's config should describe the scene that's now in viewer/
+        rargs["clean"] = dataclasses.asdict(rules)
+        recon_args_path.write_text(json.dumps(rargs))
 
 
 def cmd_view(args) -> None:
@@ -356,6 +608,14 @@ def cmd_studio(args) -> None:
 
 
 def cmd_setup_brush(args) -> None:
+    if args.from_source:
+        exe = brush.setup_from_source(Path(args.dir).expanduser())
+        print(
+            f"Brush main ({brush.SOURCE_COMMIT[:12]}) built: {exe}\n"
+            f"recon keeps using {brush.path()} until you opt in:\n  export BRUSH='{exe}'\n"
+            "(bench cards record the Brush version, so A/B it against v0.3.0 with the same run)"
+        )
+        return
     exe = brush.setup(Path(args.dir).expanduser())
     print(f"Brush installed: {exe}")
     if exe != brush.default_path() and os.environ.get("BRUSH") != str(exe):
@@ -382,9 +642,23 @@ def dispatch(args) -> None:
     elif c == "prep":
         idx = need_index(args.data)
         doctor.preflight("prep")
-        prep.run(str(idx), args.clip, args.name, args.start, args.dur, args.fps, args.width, args.mask_movers)
+        prep.run(
+            str(idx),
+            args.clip,
+            args.name,
+            args.start,
+            args.dur,
+            args.fps,
+            args.width,
+            args.mask_movers,
+            sky_model=args.sky_model,
+        )
     elif c == "recon":
         cmd_recon(args)
+    elif c == "clean":
+        cmd_clean(args)
+    elif c == "collision":
+        collision.run(need_recon(args.name, "viewer/scene.ply", "viewer/path.json"))
     elif c == "bench":
         work = need_prep(args.name)
         if not recon_attempted(work):

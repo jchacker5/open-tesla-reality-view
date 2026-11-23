@@ -179,7 +179,7 @@ def test_every_option_has_help_and_prog_is_otrv():
         for p in a.choices.values()
     )
     assert "6 cameras" not in text and "tsplat" not in text
-    assert "(default: 15000)" in text  # ArgumentDefaultsHelpFormatter
+    assert "(default: 15000)" in " ".join(text.split())  # ArgumentDefaultsHelpFormatter (may wrap)
 
 
 def test_install_viewer_copies_modules_and_user_model(tmp_path, monkeypatch):

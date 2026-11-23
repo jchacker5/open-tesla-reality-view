@@ -106,7 +106,8 @@ def _dense(tmp_path, partial_mask: bool):
 def test_apply_alpha_makes_unmasked_images_transparent_and_masked_ones_ignore_sky(tmp_path):
     dense = _dense(tmp_path, partial_mask=True)
     counts = sky.apply(dense, "alpha")
-    assert counts == {"transparent": 1, "ignored": 1, "untouched": 0}
+    # front_00001's ego strip leaves a 100 px tall crop: too small for Brush, so its sky is ignored
+    assert counts == {"transparent": 1, "cropped": 0, "ignored": 1, "untouched": 0, "held_out": 0}
     rgba = Image.open(dense / "images" / "front" / "front_00000.png")
     assert rgba.mode == "RGBA"
     a = np.asarray(rgba)[..., 3]
@@ -127,6 +128,61 @@ def test_apply_ignore_and_off(tmp_path, mode):
     m = np.asarray(Image.open(dense / "images" / "masks" / "front_00000.png"))
     assert (m[:30] == 0).all() if mode == "ignore" else (m == 255).all()
     assert (dense / "images" / "front" / "front_00000.jpg").exists()
+
+
+def _dense_with_hood(tmp_path, n=4, h=480, w=640, hood=60):
+    """n images of one PINHOLE camera whose bottom `hood` rows are the ego car (masked in every frame).
+    Frame 2 also has a mover in the middle; frame 3 is a held-out view."""
+    dense = tmp_path / "dense"
+    for d in ("images/front", "images/masks", "sky", "sparse"):
+        (dense / d).mkdir(parents=True)
+    (dense / "sparse" / "cameras.txt").write_text("# cameras\n1 PINHOLE 640 480 500.0 500.0 320.0 240.0\n")
+    lines = ["# images"]
+    for i in range(n):
+        stem = f"front_{i:05d}"
+        Image.fromarray(street(h, w, seed=i)).save(dense / "images" / "front" / f"{stem}.jpg", quality=95)
+        s = np.zeros((h, w), np.uint8)
+        s[:100] = 255
+        Image.fromarray(s).save(dense / "sky" / f"{stem}.png")
+        keep = np.full((h, w), 255, np.uint8)
+        keep[h - hood :] = 0
+        if i == 2:
+            keep[200:260, 300:340] = 0  # a mover inside the crop
+        Image.fromarray(keep).save(dense / "images" / "masks" / f"{stem}.png")
+        lines += [f"{i + 1} 1 0 0 0 0 0 0 1 front/{stem}.jpg", "450.5 400.0 7 10.0 470.0 -1"]
+    (dense / "sparse" / "images.txt").write_text("\n".join(lines) + "\n")
+    return dense
+
+
+def test_alpha_crops_the_car_out_so_the_sky_can_be_transparent(tmp_path):
+    dense = _dense_with_hood(tmp_path)
+    counts = sky.apply(dense, "alpha", skip={"front_00003"})
+    assert counts == {"transparent": 2, "cropped": 2, "ignored": 1, "untouched": 0, "held_out": 1}
+    cams = [ln.split() for ln in (dense / "sparse" / "cameras.txt").read_text().splitlines() if ln[0] != "#"]
+    assert cams[0] == "1 PINHOLE 640 480 500.0 500.0 320.0 240.0".split()
+    assert cams[1][:4] == ["2", "PINHOLE", "640", "420"] and float(cams[1][7]) == 240.0  # hood rows gone
+    body = (dense / "sparse" / "images.txt").read_text().splitlines()[1:]
+    poses = [ln.split() for ln in body[0::2]]
+    assert [(p[8], p[9]) for p in poses] == [
+        ("2", "front/front_00000.png"),
+        ("2", "front/front_00001.png"),
+        ("1", "front/front_00002.jpg"),  # the mover: sky ignored instead, uncropped
+        ("1", "front/front_00003.jpg"),  # held out: untouched
+    ]
+    assert body[1] == "450.5 400 7 10 470 -1"  # observations still refer to the same pixels
+    rgba = np.asarray(Image.open(dense / "images" / "front" / "front_00000.png"))
+    assert rgba.shape == (420, 640, 4) and (rgba[:100, :, 3] == 0).all() and (rgba[100:, :, 3] == 255).all()
+    assert not (dense / "images" / "masks" / "front_00000.png").exists()  # else Brush ignores the alpha
+    m = np.asarray(Image.open(dense / "images" / "masks" / "front_00002.png"))
+    assert (m[:100] == 0).all() and (m[420:] == 0).all() and (m[200:260, 300:340] == 0).all()
+    assert (np.asarray(Image.open(dense / "images" / "masks" / "front_00003.png"))[:100] == 255).all()
+
+
+def test_largest_free_rect():
+    free = np.ones((6, 8), bool)
+    free[4:] = False
+    free[:, 0] = False
+    assert sky.largest_free_rect(free) == (0, 4, 1, 8)
 
 
 def test_restore_dense_undoes_levers(tmp_path):

@@ -11,16 +11,26 @@ Segmenters:
   model (`prep --sky-model`, `uv sync --extra quality`): UperNet-ConvNeXt-S trained on ADE20K
       (openmmlab/upernet-convnext-small, MIT licence), class "sky".
 
-How the masks reach Brush (`recon --sky`): Brush 0.3 (and main) gives each training image exactly
-one alpha meaning. If masks/<stem>.png exists, the mask REPLACES the image's alpha and is used as a
-per-pixel loss weight (alpha_is_mask: ignored pixels); otherwise an image with transparency is
-"transparent": its alpha must be matched (match_alpha_weight) and its RGB is premultiplied, so the
-splats there are pushed to be see-through. A mask and transparent sky in one image conflict, and the
-mask wins. So with --sky alpha (default) each image gets the stronger option it can have:
-  - no ego/mover pixels in its mask -> RGBA .png with sky alpha = 0, no mask file (sky transparent);
-  - some ego/mover pixels -> keep the mask (ignored pixels) and add the sky to it (sky ignored).
-Forcing ego pixels transparent instead would erode the road beside and below the car, which those
-rays also hit. --sky ignore masks the sky out of every image; --sky off trains on it as before.
+How the masks reach Brush (`recon --sky`). Brush's precedence (0.3.0, brush-dataset scene.rs
+LoadImage::load): each training image has exactly ONE alpha meaning. If masks/<stem>.png exists, the
+mask REPLACES the image's alpha channel and the image is "masked" (alpha_is_mask: alpha is a per-pixel
+loss weight, 0 = ignored). Otherwise an image with an alpha channel is "transparent": its alpha must
+be matched (match_alpha_weight) and its RGB is premultiplied, so splats there are pushed to be
+see-through. There is no per-pixel mix: in one image, ignored ego pixels and transparent sky can't
+coexist, and the mask file wins. Making ego pixels transparent instead would erode the road beside and
+below the car, which those rays also hit.
+
+So with --sky alpha (default) every training image gets transparent sky, by cropping the ego car out:
+  - no ego/mover pixels -> RGBA .png with sky alpha = 0, no mask file;
+  - ego pixels (the car's body, at the edge of the frame in every camera) -> the image is cropped to
+    the largest rectangle that avoids its camera's static ego region (pixels masked in at least half
+    of that camera's frames), as a new PINHOLE camera with the principal point shifted, then made RGBA
+    as above. Used when the rectangle keeps >= 70% of the unmasked pixels and >= 360 px per side;
+  - otherwise (movers inside the rectangle, or an ego region a rectangle can't avoid) -> keep the mask
+    and add the sky to it (sky ignored).
+Held-out views (`recon --eval`) are left as they are, so their renders match the uncropped ground
+truth. --sky ignore masks the sky out of every image; --sky off trains on it as before. The counts
+per outcome go to recon_args.json ("sky_counts") and the bench card.
 """
 
 from __future__ import annotations
@@ -169,51 +179,154 @@ def write(out: Path, cams: list[str], use_model: bool = False) -> dict | None:
     return info
 
 
-def apply(dense: Path, mode: str) -> dict[str, int]:
+CROP_MIN_KEEP = 0.7  # the crop must keep this share of an image's unmasked pixels
+CROP_MIN_SIDE = 360  # Brush 0.3 fails on very small images (see recon._ensure_min_size)
+CROP_BLOCK = 4  # the rectangle search runs on 4x4 blocks (a block is free only if all its pixels are)
+
+
+def largest_free_rect(free: np.ndarray) -> tuple[int, int, int, int] | None:
+    """(r0, r1, c0, c1) of the largest all-True axis-aligned rectangle (histogram method), or None."""
+    h, w = free.shape
+    heights = np.zeros(w, int)
+    best, best_area = None, 0
+    for r in range(h):
+        heights = np.where(free[r], heights + 1, 0)
+        stack: list[int] = []
+        for c in range(w + 1):
+            cur = heights[c] if c < w else 0
+            while stack and heights[stack[-1]] >= cur:
+                top = stack.pop()
+                left = stack[-1] + 1 if stack else 0
+                area = heights[top] * (c - left)
+                if area > best_area:
+                    best_area, best = area, (r - heights[top] + 1, r + 1, left, c)
+            stack.append(c)
+    return best
+
+
+def crop_rect(static_masked: np.ndarray, block: int = CROP_BLOCK) -> tuple[int, int, int, int] | None:
+    """Pixel rectangle (r0, r1, c0, c1) avoiding every masked pixel, searched on block x block cells."""
+    h, w = static_masked.shape
+    hb, wb = h // block, w // block
+    if hb == 0 or wb == 0:
+        return None
+    blocks = static_masked[: hb * block, : wb * block].reshape(hb, block, wb, block).any(axis=(1, 3))
+    r = largest_free_rect(~blocks)
+    if r is None:
+        return None
+    return tuple(int(v) * block for v in r)
+
+
+def _read_model(sparse: Path):
+    cams = {}
+    cam_txt = (sparse / "cameras.txt").read_text() if (sparse / "cameras.txt").exists() else ""
+    for line in cam_txt.splitlines():
+        p = line.split()
+        if p and not line.startswith("#"):
+            cams[p[0]] = p
+    lines = (sparse / "images.txt").read_text().splitlines()
+    header = [ln for ln in lines if ln.startswith("#")]
+    body = [ln for ln in lines if not ln.startswith("#")]
+    if len(body) % 2:
+        body.append("")
+    return cams, header, [[pose, pts] for pose, pts in zip(body[0::2], body[1::2], strict=True)]
+
+
+def apply(dense: Path, mode: str, skip: set[str] | frozenset = frozenset()) -> dict[str, int]:
     """recon: turn dense/sky/<stem>.png into what Brush trains on (see the module docstring).
-    Rewrites dense/images/<cam>/<stem>.jpg -> .png (RGBA) and images.txt for transparent images,
-    or adds the sky to dense/images/masks/<stem>.png. Returns counts per outcome."""
-    counts = {"transparent": 0, "ignored": 0, "untouched": 0}
-    if mode == "off" or not (dense / "sky").is_dir():
+    Transparent images become dense/images/<cam>/<stem>.png (RGBA, cropped to avoid the car when it is
+    in frame, on a new camera); the rest get the sky added to their mask. `skip`: stems left untouched
+    (held-out views). Returns counts per outcome."""
+    counts = {"transparent": 0, "cropped": 0, "ignored": 0, "untouched": 0, "held_out": 0}
+    sparse = dense / "sparse"
+    if mode == "off" or not (dense / "sky").is_dir() or not (sparse / "images.txt").exists():
         return counts
     masks_dir = dense / "images" / "masks"
-    renamed = set()
-    for sky_png in sorted((dense / "sky").glob("*.png")):
-        stem = sky_png.stem
-        cam = stem.rsplit("_", 1)[0]
-        img = dense / "images" / cam / f"{stem}.jpg"
-        if not img.exists():
+    cams, header, entries = _read_model(sparse)
+    by_stem = {Path(e[0].split()[9]).stem: e for e in entries if len(e[0].split()) >= 10}
+
+    def keep_of(stem: str, shape) -> np.ndarray:
+        mpath = masks_dir / f"{stem}.png"
+        return np.asarray(Image.open(mpath).convert("L")) > 127 if mpath.exists() else np.ones(shape, bool)
+
+    # per camera: the static ego region (masked in at least half its frames) and the crop that avoids it
+    crops: dict[str, tuple[int, int, int, int] | None] = {}
+    if mode == "alpha":
+        per_cam: dict[str, list[np.ndarray]] = {}
+        for stem, (pose, _) in by_stem.items():
+            if (masks_dir / f"{stem}.png").exists():
+                per_cam.setdefault(pose.split()[8], []).append(~keep_of(stem, (1, 1)))
+        for cid, ms in per_cam.items():
+            shapes = {m.shape for m in ms}
+            static = np.mean(ms, axis=0) >= 0.5 if len(shapes) == 1 else None
+            usable = static is not None and static.any() and cid in cams and cams[cid][1] == "PINHOLE"
+            crops[cid] = crop_rect(static) if usable else None
+
+    new_cams: dict[tuple, str] = {}
+    next_cam = max(int(c) for c in cams) + 1 if cams else 1
+    for stem, entry in sorted(by_stem.items()):
+        pose = entry[0].split()
+        name, cid = pose[9], pose[8]
+        img = dense / "images" / name
+        sky_png = dense / "sky" / f"{stem}.png"
+        if stem in skip:
+            counts["held_out"] += 1
+            continue
+        if not sky_png.exists() or not img.exists() or name.endswith(".png"):
             continue
         sky = np.asarray(Image.open(sky_png).convert("L")) > 127
-        mpath = masks_dir / f"{stem}.png"
-        keep = np.asarray(Image.open(mpath).convert("L")) > 127 if mpath.exists() else np.ones_like(sky)
+        keep = keep_of(stem, sky.shape)
         if not sky.any():
             counts["untouched"] += 1
-        elif mode == "alpha" and keep.all():
-            rgba = np.dstack([np.asarray(Image.open(img).convert("RGB")), np.where(sky, 0, 255).astype(np.uint8)])
-            Image.fromarray(rgba, "RGBA").save(img.with_suffix(".png"))
+            continue
+        rect = None
+        if mode == "alpha" and not keep.all():
+            rect = crops.get(cid)
+            if rect is not None:
+                r0, r1, c0, c1 = rect
+                ok = keep[r0:r1, c0:c1].all() and min(r1 - r0, c1 - c0) >= CROP_MIN_SIDE
+                rect = rect if ok and (r1 - r0) * (c1 - c0) >= CROP_MIN_KEEP * keep.sum() else None
+        if mode == "alpha" and (keep.all() or rect is not None):
+            rgb = np.asarray(Image.open(img).convert("RGB"))
+            alpha = np.where(sky, 0, 255).astype(np.uint8)
+            if rect is not None:
+                r0, r1, c0, c1 = rect
+                rgb, alpha = rgb[r0:r1, c0:c1], alpha[r0:r1, c0:c1]
+                key = (cid, rect)
+                if key not in new_cams:
+                    c = cams[cid]
+                    fx, fy, cx, cy = (float(v) for v in c[4:8])
+                    new_cams[key] = str(next_cam)
+                    cams[str(next_cam)] = [str(next_cam), "PINHOLE", str(c1 - c0), str(r1 - r0)] + [
+                        repr(fx),
+                        repr(fy),
+                        repr(cx - c0),
+                        repr(cy - r0),
+                    ]
+                    next_cam += 1
+                pose[8] = new_cams[key]
+                obs = np.array(entry[1].split(), float).reshape(-1, 3) if entry[1].strip() else np.zeros((0, 3))
+                obs[:, 0] -= c0
+                obs[:, 1] -= r0
+                entry[1] = " ".join(f"{x:g} {y:g} {int(p)}" for x, y, p in obs)
+                counts["cropped"] += 1
+            Image.fromarray(np.dstack([rgb, alpha]), "RGBA").save(img.with_suffix(".png"))
             img.unlink()
-            mpath.unlink(missing_ok=True)
-            renamed.add(f"{cam}/{stem}.jpg")
+            (masks_dir / f"{stem}.png").unlink(missing_ok=True)
+            pose[9] = name[:-4] + ".png"
+            entry[0] = " ".join(pose)
             counts["transparent"] += 1
         else:
             masks_dir.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(np.where(keep & ~sky, 255, 0).astype(np.uint8)).save(mpath)
+            Image.fromarray(np.where(keep & ~sky, 255, 0).astype(np.uint8)).save(masks_dir / f"{stem}.png")
             counts["ignored"] += 1
-    if renamed:
-        _rename_in_images_txt(dense / "sparse" / "images.txt", renamed)
-    print(f"sky ({mode}): {counts['transparent']} images transparent, {counts['ignored']} with sky ignored")
+    if new_cams:
+        cam_lines = [ln for ln in (sparse / "cameras.txt").read_text().splitlines() if ln.startswith("#")]
+        (sparse / "cameras.txt").write_text("\n".join(cam_lines + [" ".join(c) for c in cams.values()]) + "\n")
+    body = [line for e in entries for line in e]
+    (sparse / "images.txt").write_text("\n".join(header + body) + "\n")
+    print(
+        f"sky ({mode}): {counts['transparent']} images transparent ({counts['cropped']} cropped around the car), "
+        f"{counts['ignored']} with sky ignored, {counts['held_out']} held out untouched"
+    )
     return counts
-
-
-def _rename_in_images_txt(images_txt: Path, names: set[str]) -> None:
-    out, n = [], 0
-    for line in images_txt.read_text().splitlines():
-        if not line.startswith("#"):
-            n += 1
-            if n % 2 == 1:
-                head, name = line.rsplit(" ", 1)
-                if name in names:
-                    line = f"{head} {name[:-4]}.png"
-        out.append(line)
-    images_txt.write_text("\n".join(out) + "\n")

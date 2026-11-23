@@ -461,7 +461,7 @@ def cmd_recon(args) -> None:
         t0 = time.perf_counter()
         densify.run(work, dense, exclude=split.held)  # held-out views must not seed the splat
         timings["dense_init"] = time.perf_counter() - t0
-    sky.apply(dense, args.sky)  # last: it can turn images into RGBA .png and rename them
+    sky_counts = sky.apply(dense, args.sky, skip=split.eval)  # after the levers that read images: renames them
     t0 = time.perf_counter()
     brush_args = ["--seed", str(args.seed)]
     brush_args += [
@@ -497,6 +497,7 @@ def cmd_recon(args) -> None:
                 "max_splats": args.max_splats,
                 "lpips_loss_weight": lpips,
                 "sky": args.sky,
+                "sky_counts": sky_counts,
                 "dense_init": args.dense_init,
                 "color_norm": args.color_norm,
                 "clean": dataclasses.asdict(rules),

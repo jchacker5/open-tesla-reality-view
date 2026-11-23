@@ -31,7 +31,7 @@ def stubbed(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.recon, "export_path", lambda *a: None)
     monkeypatch.setattr(cli.colornorm, "run", lambda *a: calls.setdefault("color_norm", True))
     monkeypatch.setattr(cli.densify, "run", lambda *a, exclude: calls.setdefault("dense_init", exclude))
-    monkeypatch.setattr(cli.sky, "apply", lambda d, mode: calls.setdefault("sky", mode))
+    monkeypatch.setattr(cli.sky, "apply", lambda d, mode, skip: calls.setdefault("sky", mode) and {})
     monkeypatch.setattr(cli.importlib.util, "find_spec", lambda name: object())
 
     def train(work_, dense_, steps, live, eval_every, extra, rules):

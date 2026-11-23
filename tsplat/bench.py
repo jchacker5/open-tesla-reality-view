@@ -380,6 +380,14 @@ def card(m: dict) -> str:
         if fl and "translucent_mass" in fl
         else None
     )
+    sc = (m.get("config") or {}).get("sky_counts") or {}
+    sky_line = (
+        f"- sky ({m['config'].get('sky')}): {sc.get('transparent', 0)} transparent "
+        f"({sc.get('cropped', 0)} cropped around the car), {sc.get('ignored', 0)} sky-ignored, "
+        f"{sc.get('untouched', 0)} without sky, {sc.get('held_out', 0)} held out"
+        if sc
+        else None
+    )
     cl = m.get("clean") or {}
     clean_line = (
         f"- clean: {cl['before']} -> {cl['after']} splats ("
@@ -397,6 +405,7 @@ def card(m: dict) -> str:
         road_line,
         floater_line,
         haze_line,
+        sky_line,
         clean_line,
         "- time: " + ", ".join(f"{k} {v:.0f}s" for k, v in t.items()) if t else "- time: n/a",
         f"- config: {json.dumps(m.get('config', {}))}",

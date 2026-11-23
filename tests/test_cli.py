@@ -131,6 +131,16 @@ def test_file_not_found_is_one_line(monkeypatch):
     assert "not found: ffprobe" in msg and "otrv doctor" in msg
 
 
+def test_viewer_html_prefers_packaged_copy(tmp_path, monkeypatch):
+    # source checkout / editable install: no packaged copy, so the repo's viewer/ is used
+    assert cli.viewer_html() == cli.ROOT / "viewer" / "index.html"
+    pkg = tmp_path / "tsplat"
+    (pkg / "viewer").mkdir(parents=True)
+    (pkg / "viewer" / "index.html").write_text("<html>packaged</html>")
+    monkeypatch.setattr(cli.resources, "files", lambda name: pkg)  # wheel install
+    assert cli.viewer_html().read_text() == "<html>packaged</html>"
+
+
 def test_view_port_in_use_suggests_another(in_tmp):
     vd = in_tmp / "work" / "a" / "viewer"
     vd.mkdir(parents=True)

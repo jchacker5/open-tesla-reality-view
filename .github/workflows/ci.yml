@@ -70,6 +70,10 @@ jobs:
         run: |
           uv run otrv prep 2026-01-02_03-04-05 --name ci --start 0 --dur 2 --fps 2
           test "$(ls work/ci/images/front | wc -l)" -eq 4
+      - name: Wheel ships the viewer
+        run: |
+          uv build --wheel --out-dir "$RUNNER_TEMP/dist"
+          unzip -l "$RUNNER_TEMP"/dist/*.whl | grep -q "tsplat/viewer/index.html"
       - name: Friendly failures
         run: |
           if uv run otrv prep 2026-01-02_03-04-05 --name bad --start 7 --dur 5 2>err.txt; then exit 1; fi

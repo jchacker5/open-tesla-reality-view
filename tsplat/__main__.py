@@ -17,11 +17,11 @@ import argparse
 import errno
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
 import webbrowser
+from importlib import resources
 from pathlib import Path
 
 from . import bench, brush, doctor, ingest, prep, recon, serve, speed
@@ -29,6 +29,17 @@ from . import bench, brush, doctor, ingest, prep, recon, serve, speed
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def viewer_html():
+    """The viewer page: packaged in the wheel as tsplat/viewer/index.html, else the repo's viewer/."""
+    packaged = resources.files("tsplat") / "viewer" / "index.html"
+    if packaged.is_file():
+        return packaged
+    source = ROOT / "viewer" / "index.html"
+    if not source.is_file():
+        raise SystemExit("viewer/index.html is missing from this install; reinstall open-tesla-reality-view")
+    return source
 
 
 class Fmt(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -265,7 +276,7 @@ def cmd_recon(args) -> None:
 
 def cmd_view(args) -> None:
     vd = need_recon(args.name, "viewer/scene.ply", "viewer/path.json") / "viewer"
-    shutil.copy2(ROOT / "viewer" / "index.html", vd / "index.html")
+    (vd / "index.html").write_bytes(viewer_html().read_bytes())
     try:
         srv = serve.make_server(vd, args.port)
     except OSError as e:

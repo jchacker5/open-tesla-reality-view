@@ -52,6 +52,17 @@
   .meta { position: absolute; top: 16px; right: 18px; text-align: right; font: 11px var(--mono); color: var(--dim); pointer-events: none;
     text-shadow: 0 1px 6px rgba(0,0,0,.6); }
   .meta .date { color: var(--text); font-size: 12px; }
+  .toast { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); background: rgba(16,18,22,.92); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; font: 12px var(--mono); z-index: 5; pointer-events: none; }
+  /* flags */
+  .app.clean, .app.noui { grid-template-columns: 1fr; }
+  .app.clean .side, .app.clean .meta { display: none; }
+  .app.noui .side, .app.noui .hud, .app.noui .meta, .app.noui .bar, .app.noui .toast { display: none; }
+  .app.noui { padding: 0; }
+  .app.noui .view { border-radius: 0; }
+  .app.render .vignette, .app.render .loading { display: none; }
+  .view { container-type: size; }
+  .frame.fixed { width: min(100cqw, 100cqh * var(--arn)); height: auto; aspect-ratio: var(--ar); }
 
   /* transport bar */
   .bar { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); width: min(720px, calc(100% - 32px));
@@ -126,6 +137,7 @@
           </div>
           <div class="chips" id="chips"></div>
         </div>
+        <div class="toast" id="toast" role="status" hidden></div>
         <div class="meta" id="meta"><div class="date" id="date"></div><div id="metaSub"></div></div>
       </div>
     </div>
@@ -143,6 +155,7 @@
         <button id="mChase" class="on" title="Chase camera">chase</button>
         <button id="mDriver" title="Driver view">driver</button>
         <button id="mFree" title="Free orbit">free</button>
+        <button id="share" title="Copy a link to this moment">link</button>
       </div>
     </div>
   </main>
@@ -163,6 +176,32 @@ import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.j
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
+// ---- URL flags (share / record) ----
+//   ?clean=1   hide the clip meta line and the raw camera panel (privacy for recordings)
+//   ?ui=0      hide all UI chrome          ?aspect=16:9|9:16|1:1  lock the canvas aspect for recording
+//   ?intro=0   skip the opening fly-in     ?render=1  deterministic render mode (see otrvRender below)
+//   #t=12.4&cam=chase   deep link to a time and camera (the "link" button copies one)
+const Q = new URLSearchParams(location.search);
+const HASH = new URLSearchParams(location.hash.slice(1));
+const RENDER = Q.get("render") === "1";
+const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const app = $("app");
+let uiOn = Q.get("ui") !== "0" && !RENDER;
+app.classList.toggle("clean", Q.get("clean") === "1");
+app.classList.toggle("noui", !uiOn);
+app.classList.toggle("render", RENDER);
+{
+  const m = /^(\d+(?:\.\d+)?)[:x](\d+(?:\.\d+)?)$/.exec(Q.get("aspect") ?? "");
+  if (m) { $("frame").classList.add("fixed"); $("frame").style.setProperty("--ar", `${m[1]} / ${m[2]}`); $("frame").style.setProperty("--arn", m[1] / m[2]); }
+}
+function setUi(on) { uiOn = on; app.classList.toggle("noui", !on); }
+let toastTimer = 0;
+function toast(msg, ms = 1800) {
+  const el = $("toast");
+  el.textContent = msg; el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), ms);
+}
 // ---- load states: progress bar, error card naming the cause ----
 const halt = () => new Promise(() => {}); // stop module evaluation quietly after an error card
 function showError(title, html) {
@@ -643,8 +682,6 @@ function updateRibbon(t) {
 // framing doesn't depend on speed). Follow modes accept a user orbit/zoom offset (drag / wheel /
 // pinch) that springs back behind the car after ~2 s idle; free mode uses OrbitControls on a proxy
 // camera whose target is dragged along with the car.
-const Q = new URLSearchParams(location.search);
-const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const CHASE = { back: 7.2, up: 2.7, ahead: 4.5, aim: 0.6, fov: 45, halfLife: 0.35 };
 const DRIVER = { fov: 60 };
 const newPose = () => ({ pos: new THREE.Vector3(), quat: new THREE.Quaternion(), fov: 45 });
@@ -812,7 +849,15 @@ let clock = 0, playing = false, rate = 1, last = performance.now();
 const RATES = [0.5, 1, 2, 4];
 $("play").onclick = togglePlay;
 $("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; videos.forEach((v) => v.playbackRate = rate); };
-addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); togglePlay(); } });
+addEventListener("keydown", (e) => {
+  if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+  if (e.code === "KeyU") setUi(!uiOn); // H is the horn in drive mode
+});
+$("share").onclick = async () => {
+  const url = `${location.origin}${location.pathname}${location.search}#t=${clock.toFixed(1)}&cam=${mode}`;
+  history.replaceState(null, "", url);
+  try { await navigator.clipboard.writeText(url); toast("Link copied"); } catch { toast("Link is in the address bar"); }
+};
 $("scrub").oninput = (e) => seek((e.target.value / 1000) * DUR);
 function setPlaying(on) {
   playing = on && ready;
@@ -824,8 +869,12 @@ function togglePlay() { setPlaying(!playing); }
 function seek(t) { clock = clamp(t, 0, DUR); chaseSpring.ready = false; videos.forEach((v) => { v.currentTime = clock; if (playing && v.paused) v.play().catch(() => {}); }); }
 setPlaying(false);
 sceneReady.then(() => {
+  if (RENDER) return;
+  const cam = HASH.get("cam"), t = parseFloat(HASH.get("t"));
+  if (["chase", "driver", "free"].includes(cam)) { setMode(cam); blend = null; }
+  if (Number.isFinite(t)) seek(t);
   if (!REDUCED_MOTION) setPlaying(true);
-  if (!REDUCED_MOTION && Q.get("intro") !== "0") intro = { t: 0 };
+  if (!REDUCED_MOTION && Q.get("intro") !== "0" && !HASH.has("t") && !HASH.has("cam")) intro = { t: 0 };
 }, () => {});
 function telAt(t) {
   if (!tel.length) return null;

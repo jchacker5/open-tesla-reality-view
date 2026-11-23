@@ -31,6 +31,38 @@ def test_registration_counts_per_camera(tmp_path):
     assert r["back"]["registered"] == 1
 
 
+def test_registration_ignores_names_missing_from_images(tmp_path):
+    work = tmp_path / "run"
+    (work / "images" / "front").mkdir(parents=True)
+    for i in range(4):
+        (work / "images" / "front" / f"{i:05d}.jpg").touch()
+    (work / "meta.json").write_text(json.dumps({"cams": ["front"]}))
+    _write_model(work, ["front/front_00000.jpg", "front/front_00003.jpg", "front/front_00042.jpg"])
+    assert bench.registration(work)["front"] == {"registered": 2, "total": 4, "ratio": 0.5}
+
+
+def test_registration_from_a_stale_model_is_an_error_not_a_pass(tmp_path, monkeypatch):
+    """Model from an 18-frame prep, images/ from a 9-frame re-prep: never report 18/9 or pass the gate."""
+    monkeypatch.setattr(bench, "environment", lambda: {})
+    work = tmp_path / "run"
+    (work / "images" / "front").mkdir(parents=True)
+    for i in range(9):
+        (work / "images" / "front" / f"{i:05d}.jpg").touch()
+    (work / "meta.json").write_text(json.dumps({"cams": ["front"]}))
+    _write_model(work, [f"front/front_{i:05d}.jpg" for i in range(18)])
+    with pytest.raises(ValueError, match="stale"):
+        bench.registration(work)
+    m = bench.run("run", workdir=str(tmp_path))
+    assert "registration" in m["errors"] and m["gate_failures"]
+    assert any(f.startswith("registration:") for f in m["gate_failures"])
+
+
+def test_gate_fails_ratio_above_one_and_empty_registration():
+    m = {"registration": {"front": {"registered": 18, "total": 9, "ratio": 2.0}}, "sparse": {"reproj_px": 0.5}}
+    assert any("> 100%" in f for f in bench.gate(m))
+    assert bench.gate({"registration": {}, "sparse": {"reproj_px": 0.5}}) == ["registration: no cameras scored"]
+
+
 def test_masked_psnr_ignores_masked_pixels(tmp_path):
     work = tmp_path / "run"
     gt_dir = work / "dense" / "images" / "front"

@@ -363,6 +363,30 @@ def check_window(clip: dict, start: float, dur: float, slack: float = 0.5) -> No
         )
 
 
+# Everything prep and the steps after it write. Re-prepping a name invalidates all of it: a new window
+# with an old dense/ or splat would let `otrv bench` score (and `otrv view` show) the previous run.
+STALE_DIRS = ("images", "masks", "viewer/cams", "sparse", "dense", "splat", "nvs", "_maskimgs", "_maskdense")
+STALE_FILES = (
+    "colmap.db",
+    "recon_args.json",
+    "timings.json",
+    "metrics.json",
+    "meta.json",
+    "pairs.txt",
+    "rig_config.json",
+    "viewer/scene.ply",
+    "viewer/path.json",
+    "viewer/telemetry.json",
+)
+
+
+def clear_stale(out: Path) -> None:
+    for d in STALE_DIRS:
+        shutil.rmtree(out / d, ignore_errors=True)
+    for f in STALE_FILES:
+        (out / f).unlink(missing_ok=True)
+
+
 def run(
     index: str,
     clip_id: str,
@@ -382,9 +406,7 @@ def run(
     cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
-    # Fresh outputs: a previous prep with a longer window or more cameras must not leak into this one.
-    for stale in (out / "images", out / "masks", out / "viewer" / "cams"):
-        shutil.rmtree(stale, ignore_errors=True)
+    clear_stale(out)
     print(f"[{name}] {len(cams)} cams, {start}s +{dur}s @ {fps} fps")
     extract_frames(cams, out, start, dur, fps, width)
     counts = {c: len(list((out / "images" / c).glob("*.jpg"))) for c in cams}

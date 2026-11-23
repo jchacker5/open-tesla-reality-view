@@ -36,12 +36,20 @@ def _image_names(dense: Path) -> list[str]:
 
 
 def registration(work: Path) -> dict[str, dict]:
+    """Per camera: registered images that still exist in images/ (dense names are <cam>/<cam>_<orig>),
+    out of the frames prep extracted. Raises if the model registers more images than exist, which means
+    dense/ is from a different prep than images/."""
     meta = json.loads((work / "meta.json").read_text())
-    names = _image_names(work / "dense")
+    names = set(_image_names(work / "dense"))
     out = {}
     for cam in meta["cams"]:
-        total = len(list((work / "images" / cam).glob("*.jpg")))
-        reg = sum(1 for n in names if n.startswith(f"{cam}/"))
+        frames = {p.name for p in (work / "images" / cam).glob("*.jpg")}
+        prefix = f"{cam}/"
+        in_cam = [n[len(prefix) :] for n in names if n.startswith(prefix)]
+        reg = sum(1 for fn in in_cam if fn.removeprefix(f"{cam}_") in frames)
+        total = len(frames)
+        if reg > total or len(in_cam) > total:
+            raise ValueError(f"{cam}: model registers {len(in_cam)} images but images/{cam} has {total}; stale dense/")
         out[cam] = {"registered": reg, "total": total, "ratio": round(reg / total, 3) if total else 0.0}
     return out
 
@@ -144,8 +152,12 @@ def environment() -> dict:
 
 def gate(m: dict) -> list[str]:
     fails = [f"{metric}: {err}" for metric, err in m.get("errors", {}).items()]
+    if not m.get("registration") and "registration" not in m.get("errors", {}):
+        fails.append("registration: no cameras scored")
     for cam, r in (m.get("registration") or {}).items():
-        if r["ratio"] < GATES["min_registration"]:
+        if r["ratio"] > 1.0:
+            fails.append(f"{cam} registration {r['registered']}/{r['total']} > 100% (stale model)")
+        elif r["ratio"] < GATES["min_registration"]:
             fails.append(f"{cam} registration {r['ratio']:.0%} < {GATES['min_registration']:.0%}")
     rp = (m.get("sparse") or {}).get("reproj_px")
     if rp is None or rp > GATES["max_reproj_px"]:

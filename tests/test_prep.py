@@ -169,3 +169,74 @@ def test_run_clears_stale_outputs_and_records_actual_dur(tmp_path, monkeypatch):
     assert meta["dur"] == pytest.approx(11 / 3.0, abs=1e-3) and meta["requested_dur"] == 4
     assert meta["frames"] == {"front": 12, "back": 11}
     assert seen["dur"] == meta["dur"]
+
+
+def fake_recon(work, n):
+    """What a finished `otrv recon --eval` leaves behind for n frames per camera."""
+    sp = work / "dense" / "sparse"
+    sp.mkdir(parents=True)
+    rows = []
+    for i in range(n):
+        rows += [f"{i + 1} 1 0 0 0 0 0 0 1 front/front_{i:05d}.jpg", ""]
+        rows += [f"{n + i + 1} 1 0 0 0 0 0 0 1 back/back_{i:05d}.jpg", ""]
+    (sp / "images.txt").write_text("\n".join(rows) + "\n")
+    (work / "sparse" / "0").mkdir(parents=True)
+    (work / "sparse" / "0" / "images.bin").write_bytes((2 * n).to_bytes(8, "little"))
+    (work / "splat" / "eval_100").mkdir(parents=True)
+    (work / "nvs").mkdir()
+    for f in ("colmap.db", "timings.json", "metrics.json", "viewer/scene.ply", "viewer/path.json"):
+        (work / f).write_text("{}")
+    (work / "recon_args.json").write_text(json.dumps({"steps": 100, "eval": True}))
+
+
+def test_reprep_deletes_downstream_state(tmp_path, monkeypatch):
+    """Repro: prep 6 s -> recon -> re-prep 3 s under the same name. Before the fix, bench scored the old
+    model against the new frames ("front 18/9") and passed; view showed the old splat."""
+    from tsplat import __main__ as cli
+    from tsplat import bench
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OTRV_SKIP_DOCTOR", "1")
+    monkeypatch.setattr(bench, "environment", lambda: {})
+    data = tmp_path / "data"
+    data.mkdir()
+    clip = CLIP | {"kind": "RecentClips", "cams": {c: f"/x/{c}.mp4" for c in ("front", "back")}}
+    (data / "index.json").write_text(json.dumps([clip]))
+    frames = {"n": 18}
+
+    def fake_extract(cams, out, start, dur, fps, width):
+        for cam in cams:
+            d = out / "images" / cam
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(frames["n"]):
+                Image.fromarray(np.full((8, 8, 3), i * 9, np.uint8)).save(d / f"{i:05d}.jpg")
+
+    def viewer_assets(cams, out, start, dur):
+        (out / "viewer").mkdir(parents=True, exist_ok=True)
+        (out / "viewer" / "telemetry.json").write_text("[]")
+
+    monkeypatch.setattr(prep, "extract_frames", fake_extract)
+    monkeypatch.setattr(prep, "write_viewer_assets", viewer_assets)
+    index = str(data / "index.json")
+    out = prep.run(index, clip["id"], "drive", 0, 6, 3.0, 640, False)
+    fake_recon(out, 18)
+
+    frames["n"] = 9
+    prep.run(index, clip["id"], "drive", 0, 3, 3.0, 640, False)
+    downstream = ("sparse", "dense", "splat", "nvs", "colmap.db", "recon_args.json", "timings.json", "metrics.json")
+    for gone in downstream:
+        assert not (out / gone).exists(), gone
+    assert not (out / "viewer" / "scene.ply").exists() and not (out / "viewer" / "path.json").exists()
+    assert (out / "meta.json").exists() and len(list((out / "images" / "front").iterdir())) == 9
+
+    m = bench.run("drive", workdir="work")  # scored directly: nothing to score, so it must FAIL
+    assert m["gate_failures"] and "registration" in m["errors"]
+
+    def refused(*argv):
+        with pytest.raises(SystemExit) as e:
+            cli.main(list(argv))
+        return str(e.value.code)
+
+    assert "run `otrv recon drive` first" in refused("view", "drive")
+    assert "run `otrv recon drive` first" in refused("bench", "drive")
+    assert "run `otrv recon drive` first" in refused("recon", "drive", "--skip-sfm")

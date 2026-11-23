@@ -99,3 +99,42 @@ jobs:
           grep -q "runs past the end" err.txt
           if uv run otrv view ci 2>err.txt; then exit 1; fi
           grep -q "run \`otrv recon ci\` first" err.txt
+
+  # C++ core (cpp/): unit tests under ASan + UBSan, a -Werror release build, then the Python extension
+  # checked against the pure-Python decoder on fuzzed input and a real H.264 clip with SEI telemetry.
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    name: native (${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: C++ unit tests (ASan + UBSan, warnings as errors)
+        run: |
+          cmake -S cpp -B build/asan -DCMAKE_BUILD_TYPE=Debug -DOTRV_SANITIZE=ON -DOTRV_WERROR=ON
+          cmake --build build/asan --parallel
+          ctest --test-dir build/asan --output-on-failure
+      - name: Release build
+        run: |
+          cmake -S cpp -B build/release -DCMAKE_BUILD_TYPE=Release -DOTRV_WERROR=ON
+          cmake --build build/release --parallel
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: uv sync --locked --group dev --extra studio --extra native
+      - if: runner.os == 'Linux'
+        name: Real H.264 clip with SEI telemetry (ffmpeg testsrc2 + injected SEI)
+        run: |
+          uv run python -c "from pathlib import Path; from tsplat.studio import synth; synth.make_teslacam(Path('$RUNNER_TEMP/TeslaCam'), seconds=20)"
+          echo "OTRV_PARITY_CLIP=$(ls "$RUNNER_TEMP"/TeslaCam/RecentClips/*-front.mp4 | head -1)" >> "$GITHUB_ENV"
+      - name: Parity with the Python decoder
+        run: uv run pytest -q -rs tests/test_sei.py tests/test_sei_native.py
+        env:
+          OTRV_REQUIRE_NATIVE: "1"
+          OTRV_SEI_BIN: build/release/otrv-sei
+      - name: Full suite with the native decoder installed
+        run: uv run pytest -q

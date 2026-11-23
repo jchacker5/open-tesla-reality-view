@@ -97,6 +97,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { toCreasedNormals } from "three/addons/utils/BufferGeometryUtils.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
@@ -164,8 +165,9 @@ function profileMesh(points, width, material, bevel = 0.06) {
     const skirt = y < 0.4 ? 1 - 0.06 * (0.4 - y) / 0.16 : 1;
     pos.setX(i, pos.getX(i) * tumble * plan * skirt);
   }
-  g.computeVertexNormals();
-  return new THREE.Mesh(g, material);
+  // smooth the curved surfaces but keep the pillar/roof/bevel creases crisp (extrusions are flat-shaded otherwise)
+  g.deleteAttribute("normal");
+  return new THREE.Mesh(toCreasedNormals(g, Math.PI / 5), material);
 }
 const paint = new THREE.MeshPhysicalMaterial({ color: 0xf4f5f7, roughness: 0.28, metalness: 0.1, clearcoat: 1, clearcoatRoughness: 0.08 });
 const glass = new THREE.MeshPhysicalMaterial({ color: 0x0b0d12, roughness: 0.05, metalness: 0.6, clearcoat: 1 });
@@ -176,7 +178,7 @@ const BODY = [[-2.2, 0.24], [2.2, 0.24], [2.36, 0.34], [2.39, 0.56], [2.3, 0.72]
 car.add(profileMesh(BODY, 1.92, paint));
 // greenhouse: dark glass from the beltline up (glass roof, windscreen, rear window, side glass)
 const GLASS = [[1.12, 0.99], [0.34, 1.53], [-0.35, 1.63], [-1.16, 1.59], [-1.76, 1.39], [-2.08, 1.15], [-1.9, 1.06], [0.9, 1.0]];
-car.add(profileMesh(GLASS, 1.8, glass, 0.05));
+car.add(profileMesh(GLASS, 1.72, glass, 0.05));
 // wheels (aero-style dark discs) at the wheelbase
 for (const z of [1.445, -1.445]) for (const x of [-0.84, 0.84]) {
   const w = new THREE.Mesh(new THREE.CylinderGeometry(0.355, 0.355, 0.26, 28), black);
@@ -202,6 +204,26 @@ for (const x of [-0.72, 0.72]) {
   car.add(head);
 }
 car.add(tail);
+// soft contact shadow so the mesh sits on the splat road instead of floating over it
+{
+  const c = document.createElement("canvas");
+  c.width = c.height = 128;
+  const g2 = c.getContext("2d");
+  const grad = g2.createRadialGradient(64, 64, 8, 64, 64, 64);
+  grad.addColorStop(0, "rgba(0,0,0,0.85)");
+  grad.addColorStop(0.55, "rgba(0,0,0,0.45)");
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  g2.fillStyle = grad;
+  g2.fillRect(0, 0, 128, 128);
+  const shadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(2.9, 6.0),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }),
+  );
+  shadow.rotation.x = -Math.PI / 2; // lie flat on the road (local +y up)
+  shadow.position.set(0, 0.02, 0);
+  shadow.renderOrder = 10;
+  car.add(shadow);
+}
 car.scale.setScalar(M);
 scene.add(car);
 scene.add(new THREE.HemisphereLight(0xdfe6f0, 0x2a2a2a, 1.2));

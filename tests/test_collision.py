@@ -28,37 +28,40 @@ def scene(mpu=1.0, wall_opacity=0.9):
 
 
 def at(doc, key, x_m, z_m):
-    """Value of grid `key` at (x, z) metres."""
-    mpu = doc["metresPerUnit"]
+    """Value of grid `key` at (x, z) metres (collision.json's grid numbers are metres)."""
     if key == "height":
         cell, x0, z0, nx = doc["cell"], doc["x0"], doc["z0"], doc["nx"]
     else:
         cell, x0, z0, nx = doc["wallCell"], doc["wx0"], doc["wz0"], doc["wnx"]
-    ix, iz = int((x_m / mpu - x0) // cell), int((z_m / mpu - z0) // cell)
-    return doc[key][iz * nx + ix] * mpu
+    ix, iz = int((x_m - x0) // cell), int((z_m - z0) // cell)
+    return doc[key][iz * nx + ix]
 
 
 @pytest.mark.parametrize("mpu", [1.0, 0.05])
 def test_ground_wall_and_basis(mpu):
     xyz, op, ego = scene(mpu)
     doc = collision.bake(xyz, op, ego)
-    assert doc["cell"] == pytest.approx(0.5 / mpu) and doc["wallCell"] == pytest.approx(0.25 / mpu)
+    assert doc["units"] == "m" and doc["cell"] == 0.5 and doc["wallCell"] == 0.25 and doc["corridor"] == 12
     assert doc["metresPerUnit"] == mpu
     b = doc["basis"]
     assert np.allclose(b["origin"], [0, 0, 0], atol=1e-6)  # road under the first pose
     assert np.allclose(b["up"], [0, -1, 0]) and np.allclose(b["fwd"], [0, 0, 1]) and np.allclose(b["right"], [1, 0, 0])
+    # right = fwd x up is the driver's right (here +x, the path runs along +z with up = -y), and the
+    # (right, up, fwd) triple is left-handed, as documented
+    r, u, f = (np.array(b[k]) for k in ("right", "up", "fwd"))
+    assert np.allclose(np.cross(f, u), r) and np.allclose(np.cross(r, u), -f) and b["handedness"] == "left"
     assert len(doc["height"]) == doc["nx"] * doc["nz"] and len(doc["wallDist"]) == doc["wnx"] * doc["wnz"]
 
     # ground: splats where there are any, the path's road height (0) where there aren't
     assert at(doc, "height", 2.1, 10.1) == pytest.approx(GROUND_M, abs=0.01)
     assert at(doc, "height", -10.1, 10.1) == pytest.approx(0.0, abs=1e-6)
-    # walls: inside the box is 0; 2 m from its face is ~2 m; the path is free; canopy isn't a wall
-    assert at(doc, "wallDist", 5.2, 7.6) == 0
+    # walls: inside the 0.5 m box is <= 0; 2 m from its face is ~2 m; the path is free; canopy isn't a wall
+    assert -0.3 <= at(doc, "wallDist", 5.2, 7.6) <= 0
     assert at(doc, "wallDist", 3.1, 7.6) == pytest.approx(2.0, abs=0.3)
     assert at(doc, "wallDist", 0.1, 7.6) == pytest.approx(5.0, abs=0.3)
     assert at(doc, "wallDist", -4.0, 3.0) > 3
-    # beyond the corridor (12 m from the path, here past its start) is wall
-    assert at(doc, "wallDist", -11.9, -11.9) == 0
+    # beyond the corridor (12 m from the path, here past its start) is wall, deeper the further out
+    assert at(doc, "wallDist", -11.9, -11.9) < at(doc, "wallDist", -10.0, -10.0) < 0
 
 
 def test_faint_splats_are_not_walls():
@@ -77,8 +80,8 @@ def test_run_and_cli_write_viewer_collision_json(tmp_path, monkeypatch):
     cli.main(["collision", "r"])
     doc = json.loads((work / "viewer" / "collision.json").read_text())
     assert {"cell", "x0", "z0", "nx", "nz", "height", "wallCell", "wx0", "wz0", "wnx", "wnz", "wallDist"} <= set(doc)
-    assert set(doc["basis"]) == {"origin", "right", "up", "fwd"} and doc["metresPerUnit"] == 1.0
-    assert at(doc, "wallDist", 5.2, 7.6) == 0
+    assert set(doc["basis"]) == {"origin", "right", "up", "fwd", "handedness"} and doc["metresPerUnit"] == 1.0
+    assert at(doc, "wallDist", 5.2, 7.6) <= 0
 
 
 def test_cli_collision_needs_a_recon(tmp_path, monkeypatch):

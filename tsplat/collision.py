@@ -1,15 +1,22 @@
 """Collision bake for the viewer's drive mode: viewer/collision.json (`recon` writes it last, after
 clean-up; `otrv collision <name>` and `otrv clean` re-bake it from viewer/scene.ply).
 
-Frame. Everything is in scene units (COLMAP's world units; `metresPerUnit` converts) in a horizontal
-frame built from viewer/path.json:
+Frame. A horizontal frame built from viewer/path.json; the basis is in scene space (COLMAP's world
+units: `origin` is a scene point, the axes are unit vectors):
   origin  the road under the first path pose (front camera minus path.json camHeight, fitted per
           scene, default 1.4 m, along `up`)
   up      path.json's `up`
   fwd     the path's overall direction (last pose minus first), made perpendicular to `up`
-  right   fwd x up (to the driver's right)
-A scene point p has grid coordinates x = (p - origin).right, z = (p - origin).fwd and height
-y = (p - origin).up; back again, p = origin + x*right + y*up + z*fwd.
+  right   fwd x up: the driver's right
+Handedness: (right, up, fwd) is a LEFT-handed triple (right x up = -fwd), like "x right, y up, z
+forward". For a right-handed frame take (right, up, -fwd) (three.js: forward is -z) or (-right, up,
+fwd); up x fwd = -right is the driver's left. Consumers that only take dot products with the axes
+(as the viewer does) are unaffected.
+
+Units. Grid numbers (cell, x0, z0, height, wallCell, wx0, wz0, wallDist, corridor) are METRES
+("units": "m"); metresPerUnit converts to scene units. A scene point p has grid coordinates
+x = (p - origin).right * metresPerUnit, z = (p - origin).fwd * metresPerUnit and height
+y = (p - origin).up * metresPerUnit; back again, p = origin + (x*right + y*up + z*fwd) / metresPerUnit.
 
 Grids. Cell (ix, iz) of a grid covers x in [x0 + ix*cell, x0 + (ix+1)*cell) and z likewise from z0;
 arrays are row-major, value = array[iz * nx + ix]. Both grids cover the corridor: everything within
@@ -18,14 +25,14 @@ arrays are row-major, value = array[iz * nx + ix]. Both grids cover the corridor
   height[]    0.5 m cells: ground height y. Per cell, the 10th percentile of the heights of the splats
               in it (opacity > 0.2, within 2 m of the path's road height, so trees and bridges don't
               count); cells with fewer than 4 such splats take the road height of the nearest path pose.
-  wallDist[]  0.25 m cells: horizontal distance to the nearest wall, in scene units (0 = inside a wall).
-              A wall cell holds at least 3 splats with opacity > 0.3 standing 0.5-3 m above the ground
-              grid, after a one-cell morphological closing. The car's own path (1 m either side) is
-              always free, and everything outside the corridor counts as wall, so drive mode stays on
-              the reconstructed part of the scene.
+  wallDist[]  0.25 m cells: signed horizontal distance to the nearest wall: > 0 in free space, <= 0 inside
+              a wall (minus the distance to free space). A wall cell holds at least 3 splats with
+              opacity > 0.3 standing 0.5-3 m above the ground grid, after a one-cell morphological
+              closing. The car's own path (1 m either side) is always free, and everything outside the
+              corridor counts as wall, so drive mode stays on the reconstructed part of the scene.
 
 Format: {cell, x0, z0, nx, nz, height[], wallCell, wx0, wz0, wnx, wnz, wallDist[],
-         basis: {origin, right, up, fwd}, metresPerUnit, corridor, version}.
+         basis: {origin, right, up, fwd, handedness}, metresPerUnit, units, corridor, version}.
 """
 
 from __future__ import annotations
@@ -149,25 +156,30 @@ def bake(xyz: np.ndarray, opacity: np.ndarray, ego: splats.EgoPath, corridor_m: 
     wlat = wlat.reshape(w.nz, w.nx)
     wall[wlat <= PATH_CLEAR_M * u] = False
     wall[wlat > corridor] = True
-    dist = distance_transform_edt(~wall) * w.cell if wall.any() else np.full(wall.shape, corridor)
+    if wall.any() and not wall.all():  # signed: + to the nearest wall outside, - to free space inside
+        dist = np.where(wall, -distance_transform_edt(wall), distance_transform_edt(~wall)) * w.cell
+    else:
+        dist = np.full(wall.shape, -corridor if wall.any() else corridor)
 
+    m = ego.mpu  # everything below is written in metres
     return {
-        "version": 1,
-        "cell": g.cell,
-        "x0": g.x0,
-        "z0": g.z0,
+        "version": 2,
+        "units": "m",
+        "cell": GROUND_CELL_M,
+        "x0": round(g.x0 * m, 4),
+        "z0": round(g.z0 * m, 4),
         "nx": g.nx,
         "nz": g.nz,
-        "height": _round(height),
-        "wallCell": w.cell,
-        "wx0": w.x0,
-        "wz0": w.z0,
+        "height": _round(height * m, 4),
+        "wallCell": WALL_CELL_M,
+        "wx0": round(w.x0 * m, 4),
+        "wz0": round(w.z0 * m, 4),
         "wnx": w.nx,
         "wnz": w.nz,
-        "wallDist": _round(dist, 4),
-        "basis": {k: np.round(v, 6).tolist() for k, v in basis.items()},
+        "wallDist": _round(dist * m, 3),
+        "basis": {**{k: np.round(v, 6).tolist() for k, v in basis.items()}, "handedness": "left"},
         "metresPerUnit": ego.mpu,
-        "corridor": corridor,
+        "corridor": corridor_m,
         "stats": {
             "splats": int(len(sx)),
             "ground_from_splats": round(float(1 - sparse.mean()), 3),

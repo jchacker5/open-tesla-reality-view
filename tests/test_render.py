@@ -49,9 +49,10 @@ def test_frame_times():
 
 
 def test_viewer_url_carries_the_contract():
-    url = render.viewer_url(1234, "9:16", "driver")
+    url = render.viewer_url(1234, "9:16")
     assert url.startswith("http://127.0.0.1:1234/index.html?") and "render=1" in url
-    assert "aspect=9%3A16" in url and "cam=driver" in url
+    assert "aspect=9%3A16" in url and "cam" not in url  # the camera goes to frame(), not the URL
+    assert render.CAMS == ("chase", "driver", "free", "drone")
 
 
 def test_chromium_args():
@@ -199,11 +200,11 @@ const p = new URLSearchParams(location.search);
 window.otrvRender = {
   ready: new Promise(r => setTimeout(r, 50)),
   duration: 1.0,
-  async frame(t, layer) {
+  async frame(t, layer, opts = {}) {   // viewer v2: frame(t, layer, {cam})
     if (p.get('render') !== '1') throw new Error('not in render mode');
     g.clearRect(0, 0, c.width, c.height);
     if (layer === 'splat') {            // red, green channel encodes t, blue encodes the camera
-      g.fillStyle = `rgb(200, ${Math.round(t * 200)}, ${p.get('cam') === 'driver' ? 255 : 0})`;
+      g.fillStyle = `rgb(200, ${Math.round(t * 200)}, ${{driver: 255, drone: 128}[opts.cam] ?? 0})`;
       g.fillRect(0, 0, c.width, c.height);
     } else if (layer === 'overlay') {   // opaque blue square in the middle, transparent elsewhere
       g.fillStyle = 'rgb(0, 0, 255)';
@@ -256,7 +257,7 @@ def test_render_loop_with_fake_viewer(work, capsys):
         im = Image.open(p)
         assert im.size == (160, 90) and im.mode == "RGB"
         r, g, b = im.getpixel((5, 5))
-        assert r == 200 and abs(g - round(i * 0.25 * 200)) <= 1 and b == 255  # t and ?cam= reached the page
+        assert r == 200 and abs(g - round(i * 0.25 * 200)) <= 1 and b == 255  # t and {cam} reached frame()
     ov = np.asarray(Image.open(overlay[0]))
     assert ov.shape == (90, 160, 4)
     assert ov[45, 80, 3] == 255 and tuple(ov[45, 80, :3]) == (0, 0, 255) and ov[2, 2, 3] == 0

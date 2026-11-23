@@ -34,7 +34,8 @@ from PIL import Image, ImageDraw, ImageFont
 from . import enhance, serve
 
 ASPECT_SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
-CAMS = ("chase", "driver", "orbit")
+# viewer v2 contract: otrvRender.frame(t, layer, {cam}); the camera is an option of each frame call
+CAMS = ("chase", "driver", "free", "drone")
 LABEL = "AI-enhanced"
 READY_TIMEOUT_S = 180
 API_TIMEOUT_S = 10  # how long the page may take to define window.otrvRender before we give up
@@ -152,9 +153,9 @@ def load_png(data: bytes, size: tuple[int, int], mode: str) -> Image.Image:
 
 # ---- capture ---------------------------------------------------------------------------------------
 
-_FRAME_JS = """async ({t, layer}) => {
+_FRAME_JS = """async ({t, layer, cam}) => {
   const R = window.otrvRender;
-  await R.frame(t, layer);
+  await R.frame(t, layer, {cam});
   const c = R.canvas || document.querySelector('canvas');
   return c.toDataURL('image/png');
 }"""
@@ -211,8 +212,8 @@ def open_browser(pw, headed: bool, swiftshader: bool):
     return browser
 
 
-def viewer_url(port: int, aspect: str, cam: str) -> str:
-    return f"http://127.0.0.1:{port}/index.html?" + urlencode({"render": 1, "aspect": aspect, "cam": cam})
+def viewer_url(port: int, aspect: str) -> str:
+    return f"http://127.0.0.1:{port}/index.html?" + urlencode({"render": 1, "aspect": aspect})
 
 
 def _need_playwright():
@@ -242,7 +243,7 @@ def capture(viewer_dir: Path, frames: Path, opts: Options) -> list[float]:
             page = browser.new_page(viewport={"width": w, "height": h}, device_scale_factor=1)
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
-            page.goto(viewer_url(srv.server_address[1], opts.aspect, opts.cam))
+            page.goto(viewer_url(srv.server_address[1], opts.aspect))
             try:
                 page.wait_for_function("() => !!window.otrvRender", timeout=API_TIMEOUT_S * 1000)
             except Exception as e:
@@ -266,7 +267,7 @@ def capture(viewer_dir: Path, frames: Path, opts: Options) -> list[float]:
             page.set_default_timeout(READY_TIMEOUT_S * 1000)
             for k, i in enumerate(todo):
                 for layer, mode in (("splat", "RGB"), ("overlay", "RGBA")):
-                    url = page.evaluate(_FRAME_JS, {"t": times[i], "layer": layer})
+                    url = page.evaluate(_FRAME_JS, {"t": times[i], "layer": layer, "cam": opts.cam})
                     data = base64.b64decode(url.split(",", 1)[1])
                     if layer == "splat" and k == 0 and _blank(data):
                         # WebGL drawing buffer already cleared (no preserveDrawingBuffer): read the

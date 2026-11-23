@@ -1,6 +1,6 @@
 # Rendering videos: `otrv render`
 
-`otrv render <name>` turns a reconstructed drive into an MP4: a chase, driver or orbit camera
+`otrv render <name>` turns a reconstructed drive into an MP4: a chase, driver, free or drone camera
 flying the recorded path, with your car, its path ribbon and shadow composited on top. An
 optional AI clean-up pass with NVIDIA Difix removes most of the floaters and smears a raw
 Gaussian splat shows.
@@ -32,8 +32,8 @@ uv run otrv render drive1
 uv run otrv render drive1 --aspect 9:16 --cam driver --enhance difix --accept-nvidia-license \
   --out work/drive1/short.mp4
 
-# square 1:1 orbit loop of 6 seconds, cleaned with the reference-guided model
-uv run otrv render drive1 --aspect 1:1 --cam orbit --start 4 --end 10 \
+# square 1:1 drone-camera loop of 6 seconds, cleaned with the reference-guided model
+uv run otrv render drive1 --aspect 1:1 --cam drone --start 4 --end 10 \
   --enhance difix-ref --accept-nvidia-license --out work/drive1/loop.mp4
 ```
 
@@ -43,7 +43,7 @@ uv run otrv render drive1 --aspect 1:1 --cam orbit --start 4 --end 10 \
 | `--fps` | 30 | output frame rate |
 | `--aspect` | 16:9 | `16:9` (1920x1080), `9:16` (1080x1920) or `1:1` (1080x1080); passed to the viewer as `?aspect=` |
 | `--size` | from `--aspect` | explicit `WxH` (even numbers); the aspect is derived from it |
-| `--cam` | chase | `chase`, `driver` or `orbit`; passed to the viewer as `?cam=` |
+| `--cam` | chase | `chase`, `driver`, `free` or `drone`; passed to every `otrvRender.frame(t, layer, {cam})` call |
 | `--start` / `--end` | whole replay | time range in seconds of replay time |
 | `--enhance` | none | `difix` or `difix-ref` (see below) |
 | `--stabilize` / `--no-stabilize` | on with `--enhance` | flow-guided anti-flicker |
@@ -56,10 +56,10 @@ uv run otrv render drive1 --aspect 1:1 --cam orbit --start 4 --end 10 \
 ## How it works
 
 1. **Capture.** `work/<name>/viewer/` is served locally (the same byte-range server `otrv view`
-   uses, on a free port) and opened in Playwright Chromium at `index.html?render=1&aspect=…&cam=…`.
+   uses, on a free port) and opened in Playwright Chromium at `index.html?render=1&aspect=…`.
    In render mode the viewer exposes
-   `window.otrvRender = { ready, duration, async frame(t, layer) }`. For every frame time `t` the
-   renderer calls `frame(t, 'splat')` (the splat alone) and `frame(t, 'overlay')` (car, ribbon and
+   `window.otrvRender = { ready, duration, async frame(t, layer, {cam}) }`. For every frame time `t` the
+   renderer calls `frame(t, 'splat', {cam})` (the splat alone) and `frame(t, 'overlay', {cam})` (car, ribbon and
    shadow on a transparent background) and reads the canvas back as PNG into
    `render/splat/NNNNN.png` and `render/overlay/NNNNN.png`. Frames are deterministic for `t`, so
    capture is resumable: re-running the same command skips frames already on disk, and changing

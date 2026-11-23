@@ -20,9 +20,12 @@ uv run otrv bench drive1 --note "fps 3 -> 4"
 `otrv bench` prints a results card and appends a JSON line to `work/ledger.jsonl` with:
 - per-camera registration;
 - sparse reprojection error;
-- masked held-out PSNR per camera;
+- masked held-out PSNR per camera (only for runs trained with `--eval`, from that run's final step);
 - stage timings;
 - the full config, plus the machine, COLMAP and Brush versions and the git SHA.
+
+Every bench appends a line, even for a broken run (say SfM failed and there is no `dense/`): each
+metric that couldn't be computed is recorded under `errors` and counts as a gate failure.
 
 **Accept a change only if:**
 - the gates pass: every camera registers at least 90% of its frames, and reprojection is at most 1.5 px;

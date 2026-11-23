@@ -75,6 +75,11 @@ class Ply:
         s = self.scales()
         return s.min(1) if s.shape[1] else np.zeros(len(self))
 
+    def mid_scale(self) -> np.ndarray:
+        """Middle axis of each splat (a flat disc has mid ~ max; a needle has mid ~ min)."""
+        s = self.scales()
+        return np.median(s, 1) if s.shape[1] else np.zeros(len(self))
+
     def rgb(self) -> np.ndarray:
         """View-independent (SH band 0) colour in [0, 1]."""
         names = ("f_dc_0", "f_dc_1", "f_dc_2")
@@ -181,15 +186,27 @@ class EgoPath:
         q = np.arange(0.0, s[-1] + 1e-9, step_m)
         return np.stack([np.interp(q, s, R[:, k]) for k in range(3)], 1)
 
-    def nearest_road(self, xyz: np.ndarray, step_m: float = 0.1):
+    def nearest_road(self, xyz: np.ndarray, step_m: float = 0.1, across: bool = False):
         """Per point: horizontal (lateral) distance to the path in metres, height above the nearest
-        road point in metres, and that road point's index into dense_road(step_m)."""
+        road point in metres, and that road point's index into dense_road(step_m).
+
+        across=False: the full horizontal distance to the nearest road point, so beyond the path's
+        ends it grows with the distance along the road (right for the ego tube: the car never got there).
+        across=True: only the part perpendicular to the path's local direction, so road ahead of the
+        last pose (or behind the first) counts as on the path, not 40 m away from it."""
         road = self.dense_road(step_m)
         right, fwd = self.horizontal_basis()
         H = np.stack([right, fwd], 1)
-        _, idx = cKDTree(road @ H).query(np.asarray(xyz) @ H, workers=-1)
+        road_h = road @ H
+        _, idx = cKDTree(road_h).query(np.asarray(xyz) @ H, workers=-1)
         rel = np.asarray(xyz) - road[idx]
-        lateral = np.linalg.norm(rel @ H, axis=1) * self.mpu
+        if across and len(road_h) > 1:
+            tan = np.gradient(road_h, axis=0)
+            tan /= np.linalg.norm(tan, axis=1, keepdims=True) + 1e-12
+            normal = np.stack([-tan[:, 1], tan[:, 0]], 1)
+            lateral = np.abs(((rel @ H) * normal[idx]).sum(1)) * self.mpu
+        else:
+            lateral = np.linalg.norm(rel @ H, axis=1) * self.mpu
         height = (rel @ self.up) * self.mpu
         return lateral, height, idx
 

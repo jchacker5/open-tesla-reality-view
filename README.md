@@ -64,8 +64,8 @@ uv run otrv view drive1                  # opens the replay in your browser
 ```
 
 **Higher fidelity (pipeline v2).** `prep` samples 6 fps by default, and `recon` trains with a
-transparent sky (plus a perceptual LPIPS loss on a source-built Brush) and prunes and dehazes the
-splat afterwards. Optional
+transparent sky (plus a perceptual LPIPS loss on a source-built Brush) and prunes floaters inside
+the car's own path afterwards (`--dehaze` adds more clean-up rules; off until validated). Optional
 levers: `recon --color-norm` (match every camera's colour to the front camera), `recon --dense-init`
 (Depth Anything V2 points plus a road ribbon; needs `uv sync --extra quality`), and
 `otrv setup-brush --from-source` (builds Brush's main branch, with its needle-splat fix and mip

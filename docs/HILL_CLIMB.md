@@ -77,11 +77,11 @@ Defaults are what `otrv prep` / `otrv recon` do with no flags. All of them land 
 | `recon --dense-init` | off | Depth Anything V2 Small points fitted to SfM, plus a road ribbon, as Brush's init (`--extra quality`) |
 | `recon --color-norm` | off | LAB mean/std match of every camera to the front camera over a 4 s window |
 | `recon --prune` | on | Drop splats in the ego swept tube and giant faint ones |
-| `recon --dehaze` | on | Drop near-invisible, large translucent and needle splats and far ground fog |
+| `recon --dehaze` | **off** until validated on real footage | Drop near-invisible, large translucent and needle (largest/middle axis) splats, and ground-level splats far ACROSS the path |
 | `--min-opacity` | 0.04 | dehaze threshold |
 | `--translucent-scale` / `--translucent-opacity` | 0.8 m / 0.35 | dehaze: large and translucent |
 | `--needle-ratio` / `--needle-opacity` | 25 / 0.5 | dehaze: needles |
-| `--ground-fog-m` | 40 m | dehaze: ground-level splats this far from the path |
+| `--ground-fog-m` | 40 m | dehaze: ground-level splats this far across the path (perpendicular to it; road ahead of the last pose is kept) |
 | `--dehaze-sky` (`--sky-fog-m`, `-saturation`, `-brightness`) | off (60 m, 0.15, 0.6) | dehaze: sky painted at a finite depth; skipped with `--sky alpha` |
 | `setup-brush --from-source` | off (v0.3.0) | Build Brush main at a pinned commit; opt in with `BRUSH=~/.local/opt/brush/src/target/release/brush` |
 
@@ -130,7 +130,7 @@ noise, no camera regresses). After the first run, use `--skip-sfm` for every tra
 ```sh
 N=drive1; R="otrv recon $N --eval --steps 30000"
 otrv prep <clip> --name $N --start <s> --dur 20 --fps 3
-$R --lpips-loss-weight 0 --max-splats 10000000 --sky off --no-prune --no-dehaze
+$R --lpips-loss-weight 0 --max-splats 10000000 --sky off --no-prune
 otrv bench $N --note "v1 control (fps 3)"
 ```
 
@@ -140,8 +140,8 @@ otrv bench $N --note "v1 control (fps 3)"
 4. `--color-norm`: per-camera PSNR on the repeaters and back.
 5. `--dense-init` (`uv sync --extra quality`): road band and far geometry.
 6. `--opac-loss-weight 1e-7` (1e-6 collapsed the smoke scene).
-7. `--prune --dehaze` (default on): no retraining, `otrv clean $N` then bench; judge on floaters and
-   haze, and by eye in `otrv view`.
+7. `--prune`, then `--dehaze` (off by default): no retraining, `otrv clean $N [--dehaze]` then bench;
+   judge on floaters and haze, and by eye in `otrv view` (check the road ahead and the road surface).
 8. Brush main: `otrv setup-brush --from-source`, then `BRUSH=... $R <winning flags>` vs v0.3.0
    (it drops the opacity/scale loss weights, so compare at the winning config).
 9. On Brush main: `--lpips-loss-weight 0.05` (its default there) vs 0. Not on v0.3.0: it aborts.

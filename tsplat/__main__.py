@@ -97,7 +97,8 @@ def add_clean_args(a: argparse.ArgumentParser) -> None:
         "--dehaze",
         action=argparse.BooleanOptionalAction,
         default=r.dehaze,
-        help="drop near-invisible, large translucent and needle splats and far ground fog (counts in clean.json)",
+        help="drop near-invisible, large translucent and needle splats and far ground fog (counts in clean.json); "
+        "off until validated on real footage",
     )
     a.add_argument("--min-opacity", type=float, default=r.min_opacity, help="dehaze: drop splats below this opacity")
     a.add_argument(
@@ -111,14 +112,14 @@ def add_clean_args(a: argparse.ArgumentParser) -> None:
         "--needle-ratio",
         type=float,
         default=r.needle_ratio,
-        help="dehaze: largest/smallest axis above this with opacity under --needle-opacity is a needle",
+        help="dehaze: largest/middle axis above this with opacity under --needle-opacity is a needle",
     )
     a.add_argument("--needle-opacity", type=float, default=r.needle_opacity, help="see --needle-ratio")
     a.add_argument(
         "--ground-fog-m",
         type=float,
         default=r.ground_fog_m,
-        help="dehaze: drop splats farther than this (metres) from the path within 1 m of road height",
+        help="dehaze: drop splats farther than this (metres) across the path within 1 m of road height",
     )
     a.add_argument(
         "--dehaze-sky",

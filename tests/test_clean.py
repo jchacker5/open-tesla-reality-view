@@ -40,7 +40,7 @@ def test_each_dehaze_rule_and_first_rule_attribution():
     ply.data["scale_0"][2] = np.log(0.6)
     ply.data["scale_1"][2] = ply.data["scale_2"][2] = np.log(0.01)
     ply.data["scale_0"][6] = np.log(1.5)
-    kept, stats = clean.clean(ply, _ego(), clean.Rules())
+    kept, stats = clean.clean(ply, _ego(), clean.Rules(dehaze=True))
     assert stats["removed"] == {
         "tube": 1,
         "giant": 0,
@@ -58,9 +58,37 @@ def test_sky_fog_rule_is_opt_in_and_needs_pale_bright_above_eye_level():
     ply = make_ply(pts, opacity=0.9)
     ply.data["f_dc_0"] = ply.data["f_dc_1"] = ply.data["f_dc_2"] = 1.0  # pale and bright (rgb 0.78)
     ply.data["f_dc_0"][1] = -1.5  # saturated (cyan-ish): not sky haze
-    assert "sky_fog" not in clean.masks(ply, _ego(), clean.Rules())
-    m = clean.masks(ply, _ego(), clean.Rules(sky_fog=True))["sky_fog"]
+    assert "sky_fog" not in clean.masks(ply, _ego(), clean.Rules(dehaze=True))
+    m = clean.masks(ply, _ego(), clean.Rules(dehaze=True, sky_fog=True))["sky_fog"]
     assert m.tolist() == [True, False, False, False]  # #2 below eye level, #3 farther than 60 m
+
+
+def test_dehaze_is_off_by_default():
+    assert clean.Rules().dehaze is False and clean.Rules().prune is True
+
+
+def test_dehaze_keeps_road_ahead_of_the_path_and_flat_road_discs():
+    """The path ends at z = 20. Road splats 50 m and 70 m further on (on the path's line, at road
+    height) are road, not ground fog; a flat road disc (0.3 x 0.3 x 0.005 m) is not a needle. A road
+    splat 50 m to the side still is ground fog, and a real needle (1 x 0.01 x 0.01 m) still goes."""
+    pts = [[0, 0, 70], [0.5, 0, 90], [5, -0.05, 10], [50, 0, 10], [5, -1, 12]]
+    ply = make_ply(pts, opacity=[0.9, 0.9, 0.45, 0.9, 0.45], scale_m=0.05)
+    for k, v in (("scale_0", 0.3), ("scale_1", 0.3), ("scale_2", 0.005)):  # #2: flat disc
+        ply.data[k][2] = np.log(v)
+    for k, v in (("scale_0", 1.0), ("scale_1", 0.01), ("scale_2", 0.01)):  # #4: needle
+        ply.data[k][4] = np.log(v)
+    kept, stats = clean.clean(ply, _ego(), clean.Rules(dehaze=True))
+    assert stats["removed"]["ground_fog"] == 1 and stats["removed"]["needle"] == 1
+    assert sorted(kept.xyz()[:, 2].tolist()) == [10, 70, 90]
+    assert 50 not in kept.xyz()[:, 0].tolist()
+
+
+def test_across_distance_ignores_distance_along_the_path():
+    ego = _ego()
+    lat, _, _ = ego.nearest_road(np.array([[0, 0, 70.0], [3, 0, 70.0], [3, 0, 10.0]]))
+    across, _, _ = ego.nearest_road(np.array([[0, 0, 70.0], [3, 0, 70.0], [3, 0, 10.0]]), across=True)
+    assert lat[0] == pytest.approx(50) and across[0] == pytest.approx(0, abs=1e-6)
+    assert across[1] == pytest.approx(3) and across[2] == pytest.approx(3) and lat[2] == pytest.approx(3)
 
 
 def test_translucent_mass():
@@ -74,7 +102,7 @@ def test_run_writes_scene_raw_and_clean_json_and_reruns_from_raw(tmp_path):
     src = work / "splat" / "splat_100.ply"
     ply = make_ply([[0, -1, 4], [5, -1, 5], [5, -1, 6]], opacity=[0.9, 0.9, 0.02])
     splats.write_ply(src, ply)
-    stats = clean.run(work, src, clean.Rules())
+    stats = clean.run(work, src, clean.Rules(dehaze=True))
     assert stats["before"] == 3 and stats["after"] == 1
     assert json.loads((work / "clean.json").read_text())["removed"]["tube"] == 1
     assert len(splats.read_ply(work / "viewer" / "scene_raw.ply")) == 3

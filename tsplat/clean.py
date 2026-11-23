@@ -8,11 +8,13 @@ first rule that removes it, in this order:
   prune (recon --prune, default on)
     tube           inside the ego swept tube (1 m either side of the path, 0.15-1.6 m above the road)
     giant          any axis > 3 m and opacity < 0.2
-  dehaze (--dehaze, default on)
+  dehaze (--dehaze, default OFF until validated on real footage)
     low_opacity    opacity < --min-opacity (0.04): contributes almost nothing on its own, but stacks
     translucent    largest axis > --translucent-scale (0.8 m) and opacity < --translucent-opacity (0.35)
-    needle         largest/smallest axis > --needle-ratio (25) and opacity < --needle-opacity (0.5)
-    ground_fog     more than --ground-fog-m (40 m) from the path and within 1 m of road height
+    needle         largest/middle axis > --needle-ratio (25) and opacity < --needle-opacity (0.5); largest/
+                   middle, not largest/smallest, so flat road discs (0.3 x 0.3 x 0.005 m) are not needles
+    ground_fog     more than --ground-fog-m (40 m) ACROSS the path (perpendicular to it, so the road
+                   ahead of the last pose is not "far") and within 1 m of road height
     sky_fog        only with --dehaze-sky, and only when the sky wasn't trained transparent: above
                    eye level, nearer than --sky-fog-m (60 m), pale (saturation < 0.15) and bright
                    (> 0.6): sky painted at a finite depth
@@ -39,7 +41,7 @@ TRANSLUCENT = 0.35  # bench: opacity below this counts as translucent haze mass
 @dataclass
 class Rules:
     prune: bool = True
-    dehaze: bool = True
+    dehaze: bool = False
     min_opacity: float = 0.04
     translucent_scale_m: float = 0.8
     translucent_opacity: float = 0.35
@@ -60,15 +62,16 @@ def masks(ply: splats.Ply, ego: splats.EgoPath, rules: Rules) -> dict[str, np.nd
     op = ply.opacity()
     big = ply.max_scale() * ego.mpu
     lateral, height, _ = ego.nearest_road(ply.xyz()) if n else (np.zeros(0), np.zeros(0), None)
+    across = ego.nearest_road(ply.xyz(), across=True)[0] if n and rules.dehaze else np.zeros(n)
     if rules.prune:
         out["tube"] = (lateral <= splats.TUBE_RADIUS_M) & (height >= splats.TUBE_LO_M) & (height <= splats.TUBE_HI_M)
         out["giant"] = (big > 3.0) & (op < 0.2)
     if rules.dehaze:
         out["low_opacity"] = op < rules.min_opacity
         out["translucent"] = (big > rules.translucent_scale_m) & (op < rules.translucent_opacity)
-        ratio = ply.max_scale() / np.maximum(ply.min_scale(), 1e-12)
+        ratio = ply.max_scale() / np.maximum(ply.mid_scale(), 1e-12)
         out["needle"] = (ratio > rules.needle_ratio) & (op < rules.needle_opacity)
-        out["ground_fog"] = (lateral > rules.ground_fog_m) & (np.abs(height) < rules.ground_fog_band_m)
+        out["ground_fog"] = (across > rules.ground_fog_m) & (np.abs(height) < rules.ground_fog_band_m)
         if rules.sky_fog:
             rgb = ply.rgb()
             bright = rgb.max(1)

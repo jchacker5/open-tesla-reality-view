@@ -439,6 +439,44 @@ scene.environmentIntensity = 0.85;
 const key = new THREE.DirectionalLight(0xfff6ec, 2.2);
 scene.add(key, key.target);
 
+// ---- recorded path: Catmull-Rom positions, slerped heading ----
+const CAM_HEIGHT = 1.4; // front camera height above road (m)
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const easeInOut = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+const _m4 = new THREE.Matrix4(), _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
+// car-space orientation (x = left, y = up, z = forward) from a forward vector
+function headingQuat(f, out = new THREE.Quaternion()) {
+  const left = new THREE.Vector3().crossVectors(UP, f).normalize();
+  const fwd = new THREE.Vector3().crossVectors(left, UP).normalize();
+  return out.setFromRotationMatrix(_m4.makeBasis(left, UP, fwd));
+}
+for (const fr of frames) fr.q = headingQuat(fr.f);
+const T0 = frames[0].t, T1 = frames.at(-1).t;
+function segAt(t) {
+  t = clamp(t, T0, T1);
+  let lo = 1, hi = frames.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; frames[m].t < t ? (lo = m + 1) : (hi = m); }
+  const a = frames[lo - 1], b = frames[lo];
+  return [lo, b.t === a.t ? 0 : clamp((t - a.t) / (b.t - a.t), 0, 1)];
+}
+// Pose of the recorded drive at time t: p = front camera, road = point under it, carPos = car centre.
+function poseAt(t) {
+  const [i, k] = segAt(t);
+  const P = (j) => frames[clamp(j, 0, frames.length - 1)].p;
+  const p0 = P(i - 2), p1 = P(i - 1), p2 = P(i), p3 = P(i + 1);
+  const k2 = k * k, k3 = k2 * k;
+  const p = new THREE.Vector3()
+    .addScaledVector(p0, -0.5 * k3 + k2 - 0.5 * k)
+    .addScaledVector(p1, 1.5 * k3 - 2.5 * k2 + 1)
+    .addScaledVector(p2, -1.5 * k3 + 2 * k2 + 0.5 * k)
+    .addScaledVector(p3, 0.5 * k3 - 0.5 * k2);
+  const q = frames[i - 1].q.clone().slerp(frames[i].q, k);
+  const f = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+  const road = p.clone().addScaledVector(UP, -CAM_HEIGHT * M);
+  const carPos = road.clone().addScaledVector(f, -CAR.camZ * M); // the front camera sits ahead of the car centre
+  return { p, q, f, road, carPos };
+}
+
 // Planned-path ribbon: next few seconds of trajectory, laid on the road.
 const RIBBON_PTS = 40;
 const ribbonGeo = new THREE.BufferGeometry();
@@ -449,19 +487,6 @@ ribbonGeo.setIndex(idx);
 const ribbon = new THREE.Mesh(ribbonGeo, new THREE.MeshBasicMaterial({ color: 0x3d7bff, transparent: true, opacity: .75, side: THREE.DoubleSide, depthWrite: false }));
 ribbon.renderOrder = 10;
 scene.add(ribbon);
-
-const CAM_HEIGHT = 1.4; // front camera height above road (m)
-function poseAt(t) {
-  t = Math.max(frames[0].t, Math.min(frames.at(-1).t, t));
-  let i = frames.findIndex((f) => f.t >= t);
-  if (i <= 0) i = 1;
-  const a = frames[i - 1], b = frames[i];
-  const k = b.t === a.t ? 0 : (t - a.t) / (b.t - a.t);
-  const p = a.p.clone().lerp(b.p, k);
-  const f = a.f.clone().lerp(b.f, k).normalize();
-  const road = p.clone().addScaledVector(UP, -CAM_HEIGHT * M);
-  return { p, f, road };
-}
 function updateRibbon(t) {
   const pos = ribbonGeo.attributes.position.array;
   for (let i = 0; i < RIBBON_PTS; i++) {
@@ -475,22 +500,174 @@ function updateRibbon(t) {
   ribbonGeo.computeBoundingSphere();
 }
 
-// ---- camera modes ----
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enabled = false;
+// ---- camera system ----
+// Every mode produces a target pose {pos, quat, fov}. Mode switches blend from the last rendered pose
+// over 0.8 s (eased). Chase heading runs through a critically damped spring (no position lag, so
+// framing doesn't depend on speed). Follow modes accept a user orbit/zoom offset (drag / wheel /
+// pinch) that springs back behind the car after ~2 s idle; free mode uses OrbitControls on a proxy
+// camera whose target is dragged along with the car.
+const Q = new URLSearchParams(location.search);
+const REDUCED_MOTION = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const CHASE = { back: 7.2, up: 2.7, ahead: 4.5, aim: 0.6, fov: 45, halfLife: 0.35 };
+const DRIVER = { fov: 60 };
+const newPose = () => ({ pos: new THREE.Vector3(), quat: new THREE.Quaternion(), fov: 45 });
+function lookPose(out, eye, target, fov) {
+  out.pos.copy(eye);
+  out.quat.setFromRotationMatrix(_m4.lookAt(eye, target, UP));
+  out.fov = fov;
+  return out;
+}
+// critically damped spring (half-life parameterisation), applied per component
+function springV3(x, v, target, halfLife, dt) {
+  const y = (2 * Math.LN2) / halfLife, e = Math.exp(-y * dt);
+  const j0 = _v.subVectors(x, target), j1 = _v2.copy(v).addScaledVector(j0, y);
+  x.copy(target).addScaledVector(j0, e).addScaledVector(j1, dt * e);
+  v.multiplyScalar(e).addScaledVector(j1, -y * dt * e);
+}
+const chaseSpring = { f: new THREE.Vector3(), v: new THREE.Vector3(), ready: false };
+function stepChaseSpring(f, dt) {
+  if (!chaseSpring.ready) { chaseSpring.f.copy(f); chaseSpring.v.set(0, 0, 0); chaseSpring.ready = true; return; }
+  springV3(chaseSpring.f, chaseSpring.v, f, CHASE.halfLife, dt);
+  chaseSpring.f.addScaledVector(UP, -chaseSpring.f.dot(UP)).normalize();
+}
+// deterministic spring state at time t: settle at t-3 s, then integrate at a fixed 60 Hz up to t
+function settleChaseSpring(t) {
+  chaseSpring.ready = false;
+  const t0 = t - 3;
+  for (let s = 0; s <= 180; s++) stepChaseSpring(poseAt(t0 + s / 60).f, 1 / 60);
+}
+const view = { yaw: 0, pitch: 0, zoom: 1, idle: 99 }; // user offsets for follow modes
+function chasePose(out, carPos, fwd, P = CHASE) {
+  const back = _v.copy(fwd).negate().applyAxisAngle(UP, view.yaw).clone();
+  const len = Math.hypot(P.back, P.up) * view.zoom;
+  const elev = clamp(Math.atan2(P.up, P.back) + view.pitch, 0.04, 1.35);
+  const eye = carPos.clone().addScaledVector(back, Math.cos(elev) * len * M).addScaledVector(UP, Math.sin(elev) * len * M);
+  const target = carPos.clone().addScaledVector(back, -P.ahead * M).addScaledVector(UP, P.aim * M);
+  return lookPose(out, eye, target, P.fov);
+}
+function driverPose(out, pose) {
+  const dir = pose.f.clone().applyAxisAngle(UP, view.yaw);
+  const eye = pose.p.clone().addScaledVector(pose.f, 0.05 * M);
+  const target = eye.clone().addScaledVector(dir, 10 * M).addScaledVector(UP, (-0.6 + 10 * Math.tan(view.pitch * 0.6)) * M);
+  return lookPose(out, eye, target, clamp(DRIVER.fov / view.zoom, 30, 85));
+}
+
+const orbitCam = new THREE.PerspectiveCamera(45, 1, camera.near, camera.far);
+orbitCam.up.copy(UP);
+const controls = new OrbitControls(orbitCam, renderer.domElement);
+Object.assign(controls, { enabled: false, enableDamping: true, dampingFactor: 0.12, minDistance: 2.5 * M, maxDistance: 90 * M,
+  minPolarAngle: 0.05, maxPolarAngle: 1.5, screenSpacePanning: true });
+const freeAnchor = new THREE.Vector3();
+function placeFree(carPos, f, threeQuarter) {
+  const left = new THREE.Vector3().crossVectors(UP, f).normalize();
+  controls.target.copy(carPos).addScaledVector(UP, 0.8 * M);
+  if (threeQuarter) orbitCam.position.copy(carPos).addScaledVector(f, 5.2 * M).addScaledVector(left, 4.6 * M).addScaledVector(UP, 2.1 * M);
+  else orbitCam.position.copy(camera.position);
+  freeAnchor.copy(carPos);
+  controls.update();
+}
+
 let mode = "chase";
-const smoothPos = new THREE.Vector3(), smoothLook = new THREE.Vector3();
-let first = true;
+let blend = null; // { from: pose, u: 0..1, dur }
+let intro = null; // { t } while the opening fly-in runs
+const lastPose = newPose();
+function startBlend(dur = 0.8) {
+  blend = { from: { pos: camera.position.clone(), quat: camera.quaternion.clone(), fov: camera.fov }, u: 0, dur };
+}
 function setMode(m) {
+  if (m === mode) return;
+  startBlend();
+  intro = null;
   mode = m;
   for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
   controls.enabled = m === "free";
-  if (m === "free") controls.target.copy(poseAt(clock).road);
-  first = true;
+  if (m === "free") { const ps = poseAt(clock); placeFree(ps.carPos, ps.f, false); }
+  resetView(false);
+}
+function resetView(recentre = true) {
+  Object.assign(view, { yaw: 0, pitch: 0, zoom: 1, idle: 99 });
+  if (recentre && mode === "free") { startBlend(); const ps = poseAt(clock); placeFree(ps.carPos, ps.f, true); }
 }
 $("mChase").onclick = () => setMode("chase");
 $("mDriver").onclick = () => setMode("driver");
 $("mFree").onclick = () => setMode("free");
+
+// follow-mode orbit / zoom: drag (any button) orbits, wheel / pinch zooms, double-click resets
+{
+  const el = renderer.domElement, pts = new Map();
+  let pinch = 0;
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
+  el.addEventListener("pointerdown", (e) => { if (mode === "free") return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); el.setPointerCapture?.(e.pointerId); });
+  const end = (e) => { pts.delete(e.pointerId); pinch = 0; };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.addEventListener("pointermove", (e) => {
+    if (mode === "free" || !pts.has(e.pointerId)) return;
+    const prev = pts.get(e.pointerId);
+    const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) {
+      view.yaw -= dx * 0.006;
+      view.pitch = clamp(view.pitch + dy * 0.004, -0.5, 0.9);
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch) view.zoom = clamp(view.zoom * (pinch / d), 0.45, 2.6);
+      pinch = d;
+    }
+    view.idle = 0;
+  });
+  el.addEventListener("wheel", (e) => {
+    if (mode === "free") return;
+    e.preventDefault();
+    view.zoom = clamp(view.zoom * Math.exp(e.deltaY * 0.0012), 0.45, 2.6);
+    view.idle = 0;
+  }, { passive: false });
+  el.addEventListener("dblclick", () => resetView(true));
+}
+
+// Camera pose for the current mode at the current clock (no blending).
+const modePose = newPose(), tmpPose = newPose();
+function computeModePose(ps) {
+  if (mode === "chase") return chasePose(modePose, ps.carPos, chaseSpring.f);
+  if (mode === "driver") return driverPose(modePose, ps);
+  modePose.pos.copy(orbitCam.position); modePose.quat.copy(orbitCam.quaternion); modePose.fov = 50;
+  return modePose;
+}
+function applyPose(p) {
+  camera.position.copy(p.pos);
+  camera.quaternion.copy(p.quat);
+  if (camera.fov !== p.fov) { camera.fov = p.fov; camera.updateProjectionMatrix(); }
+}
+function mixPose(out, a, b, u) {
+  out.pos.lerpVectors(a.pos, b.pos, u);
+  out.quat.slerpQuaternions(a.quat, b.quat, u);
+  out.fov = a.fov + (b.fov - a.fov) * u;
+  return out;
+}
+// update everything camera-related for this frame; dt = real seconds since last frame
+function updateCamera(ps, dt, rdt = dt) {
+  stepChaseSpring(ps.f, dt);
+  if (view.idle > 2) { const k = 1 - Math.exp(-3 * dt); view.yaw -= view.yaw * k; view.pitch -= view.pitch * k; }
+  view.idle += dt;
+  if (mode === "free") {
+    _v.subVectors(ps.carPos, freeAnchor);
+    orbitCam.position.add(_v); controls.target.add(_v); freeAnchor.copy(ps.carPos);
+    controls.update();
+  }
+  let p = computeModePose(ps);
+  if (intro) { // opening fly-in: hold the front-camera view ~1 s, then pull back and up to chase over 2.5 s
+    intro.t += rdt;
+    const u = easeInOut(clamp((intro.t - 1) / 2.5, 0, 1));
+    p = mixPose(tmpPose, driverPose(newPose(), ps), p, u);
+    if (intro.t > 3.5) intro = null;
+  }
+  if (blend) {
+    blend.u = Math.min(1, blend.u + rdt / blend.dur);
+    p = mixPose(tmpPose, blend.from, p, easeInOut(blend.u));
+    if (blend.u >= 1) blend = null;
+  }
+  applyPose(p);
+}
 
 // ---- playback ----
 let clock = 0, playing = true, rate = 1, last = performance.now();
@@ -500,8 +677,9 @@ $("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.lengt
 addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); togglePlay(); } });
 $("scrub").oninput = (e) => seek((e.target.value / 1000) * DUR);
 function togglePlay() { playing = !playing; $("play").textContent = playing ? "❚❚" : "▶"; videos.forEach((v) => playing ? v.play().catch(() => {}) : v.pause()); }
-function seek(t) { clock = t; videos.forEach((v) => { v.currentTime = t; if (playing && v.paused) v.play().catch(() => {}); }); }
+function seek(t) { clock = t; chaseSpring.ready = false; videos.forEach((v) => { v.currentTime = t; if (playing && v.paused) v.play().catch(() => {}); }); }
 videos.forEach((v) => v.play().catch(() => {}));
+if (!REDUCED_MOTION && Q.get("intro") !== "0") intro = { t: 0 };
 
 function telAt(t) {
   if (!tel.length) return null;
@@ -541,15 +719,34 @@ function hud(t) {
 function resize() {
   const { clientWidth: w, clientHeight: h } = stage;
   renderer.setSize(w, h, false);
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
+  camera.aspect = orbitCam.aspect = w / h;
+  camera.updateProjectionMatrix(); orbitCam.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(stage);
 
-window.__otrv = { THREE, scene, camera, car, controls, egoHole, splat, M, UP }; // debug handle (tests)
-const basis = new THREE.Matrix4();
+// place car + clean-up box at a pose and apply telemetry-driven lamps / steering
+function placeCar(ps, t) {
+  car.quaternion.copy(ps.q);
+  car.position.copy(ps.carPos);
+  egoHole.position.copy(car.position); egoHole.quaternion.copy(car.quaternion);
+  const s = telAt(t);
+  setCarSignals({ brake: !!s?.brake, blinkL: !!s?.blinkL, blinkR: !!s?.blinkR, steer: s?.steer != null ? THREE.MathUtils.degToRad(s.steer * steerSign) / 15 : 0, t });
+}
+// hide the car while the camera is inside it (driver view, start of the intro, blends)
+function carVisibleFrom(cam) {
+  car.updateMatrixWorld();
+  const l = car.worldToLocal(_v.copy(cam.position));
+  return !(Math.abs(l.x) < 1.15 && l.y < 1.9 && Math.abs(l.z) < 2.6);
+}
+function updateKeyLight() {
+  camera.updateMatrixWorld();
+  key.position.copy(camera.position).addScaledVector(UP, 4 * M).addScaledVector(camera.getWorldDirection(_v), -3 * M);
+  key.target.position.copy(car.position);
+}
+
+window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, M, UP, view, poseAt, setMode, seek }; // debug handle (tests)
 renderer.setAnimationLoop((now) => {
-  const dt = Math.max(0, Math.min(0.1, (now - last) / 1000));
+  const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
   last = now;
   if (playing) {
     // follow the lead video when it is actually playing, so slow frames don't drag the clock behind the footage
@@ -565,33 +762,12 @@ renderer.setAnimationLoop((now) => {
     else v.playbackRate = rate * (1 + Math.max(-0.25, Math.min(0.25, d)));
   }
 
-  const { p, f, road } = poseAt(clock);
-  const side = new THREE.Vector3().crossVectors(f, UP).normalize();
-  basis.makeBasis(side.clone().negate(), UP, f);
-  car.quaternion.setFromRotationMatrix(basis);
-  car.position.copy(road).addScaledVector(f, -CAR.camZ * M); // front camera sits ahead of the car centre
-  egoHole.position.copy(car.position); egoHole.quaternion.copy(car.quaternion);
-  car.visible = mode !== "driver";
-  const s = telAt(clock);
-  setCarSignals({ brake: !!s?.brake, blinkL: !!s?.blinkL, blinkR: !!s?.blinkR, steer: s?.steer != null ? THREE.MathUtils.degToRad(s.steer * steerSign) / 15 : 0, t: clock });
+  const ps = poseAt(clock);
+  placeCar(ps, clock);
   updateRibbon(clock);
-
-  if (mode === "chase" || mode === "driver") {
-    const want = mode === "chase"
-      ? road.clone().addScaledVector(f, -6.5 * M).addScaledVector(UP, 2.6 * M)
-      : p.clone().addScaledVector(f, 0.2 * M);
-    const look = mode === "chase" ? road.clone().addScaledVector(f, 8 * M).addScaledVector(UP, 0.6 * M) : p.clone().add(f);
-    const k = first ? 1 : 1 - Math.pow(0.002, dt);
-    smoothPos.lerp(want, k); smoothLook.lerp(look, k); first = false;
-    camera.position.copy(smoothPos);
-    camera.lookAt(smoothLook);
-  } else {
-    controls.update();
-  }
-  // key light from behind and above the camera
-  camera.updateMatrixWorld();
-  key.position.copy(camera.position).addScaledVector(UP, 4 * M).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), -3 * M);
-  key.target.position.copy(car.position);
+  updateCamera(ps, dt, rdt);
+  car.visible = carVisibleFrom(camera);
+  updateKeyLight();
   hud(clock);
   renderer.render(scene, camera);
 });

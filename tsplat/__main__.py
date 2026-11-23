@@ -65,6 +65,18 @@ def install_viewer(vd: Path) -> None:
     src = user_models_dir()
     if (src / "car.json").is_file():
         shutil.copytree(src, out, ignore=shutil.ignore_patterns(".*"))
+    write_viewer_features(vd)
+
+
+def write_viewer_features(vd: Path) -> None:
+    """features.json: which optional viewer files exist, so the page only requests those (no 404s)."""
+    sounds = sorted(p.name for p in (vd / "sounds").glob("*.mp3")) if (vd / "sounds").is_dir() else []
+    features = {
+        "collision": (vd / "collision.json").is_file(),
+        "model": (vd / "models" / "car.json").is_file(),
+        "sounds": sounds,
+    }
+    (vd / "features.json").write_text(json.dumps(features))
 
 
 class Fmt(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):

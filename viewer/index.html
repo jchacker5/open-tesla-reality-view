@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drive Replay</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     --bg: #07080a; --panel: #101216; --line: #1f232a; --text: #e8eaee; --dim: #8a909c;
@@ -278,11 +279,16 @@ if (location.protocol === "file:") {
     "In the viewer folder run <code>python3 -m http.server 8000</code> and open <code>http://localhost:8000</code>.");
   await halt();
 }
-const [path, tel, plyHead] = await Promise.all([
+// features.json (written by `otrv view`) lists which OPTIONAL files exist: { collision: bool,
+// model: bool, sounds: ["horn.mp3", ...] }. With it the page requests only those (no 404 noise);
+// without it (any other static server) each optional file is probed.
+const [path, tel, plyHead, FEATURES] = await Promise.all([
   fetch("path.json").then(async (r) => (r.ok ? r.json() : { missing: r.status }), (e) => ({ missing: String(e) })).catch((e) => ({ broken: String(e) })),
   fetch("telemetry.json").then((r) => (r.ok ? r.json() : []), () => []).catch(() => []),
   fetch("scene.ply", { method: "HEAD" }).then((r) => r.status, () => 0),
+  fetch("features.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null), () => null).catch(() => null),
 ]);
+const hasOptional = (kind, name) => !FEATURES || (kind === "sounds" ? (FEATURES.sounds ?? []).includes(name) : !!FEATURES[kind]);
 if (path.missing || path.broken || !path.frames?.length) {
   showError(path.broken ? "path.json is unreadable" : "path.json is missing",
     `The viewer needs <code>path.json</code> (the car's trajectory) next to <code>index.html</code>` +
@@ -397,6 +403,7 @@ car.add(carApi.group);
 let carCredit = "";
 const carLoaded = (async () => {
   try {
+    if (!hasOptional("model")) return false;
     const r = await fetch("models/car.json");
     if (!r.ok) return false;
     const cfg = await r.json();
@@ -1021,6 +1028,7 @@ async function loadCollision() {
   if (collTried) return;
   collTried = true;
   try {
+    if (!hasOptional("collision")) return;
     const r = await fetch("collision.json");
     if (r.ok) { COLL = prepCollision(await r.json()); if (COLL) toast("collision.json loaded: ground + walls"); }
   } catch (e) { console.warn("collision.json ignored:", e); }
@@ -1593,7 +1601,8 @@ const sound = (() => {
   };
   async function loadUser(name) {
     try {
-      const h = await fetch(`sounds/${name}.mp3`, { method: "HEAD" });
+      if (!hasOptional("sounds", `${name}.mp3`)) return null;
+      const h = await fetch(`sounds/${name}.mp3`, { method: "HEAD", cache: "no-store" });
       if (!h.ok) return null;
       return await ctx.decodeAudioData(await (await fetch(`sounds/${name}.mp3`)).arrayBuffer());
     } catch { return null; }

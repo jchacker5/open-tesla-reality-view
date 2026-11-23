@@ -37,6 +37,17 @@ ASPECT_SIZES = {"16:9": (1920, 1080), "9:16": (1080, 1920), "1:1": (1080, 1080)}
 CAMS = ("chase", "driver", "orbit")
 LABEL = "AI-enhanced"
 READY_TIMEOUT_S = 180
+API_TIMEOUT_S = 10  # how long the page may take to define window.otrvRender before we give up
+NEEDS_V2 = (
+    "otrv render needs viewer v2: the served viewer page has no render API (window.otrvRender, "
+    "opened with ?render=1). Update viewer/index.html to viewer v2 (PR #15), or pass a v2 page"
+)
+
+
+def check_viewer(page: bytes) -> None:
+    """Fail at once, before launching a browser, when the viewer page predates the render API."""
+    if b"otrvRender" not in page:
+        raise SystemExit(NEEDS_V2 + ".")
 
 
 @dataclass
@@ -233,11 +244,12 @@ def capture(viewer_dir: Path, frames: Path, opts: Options) -> list[float]:
             page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
             page.goto(viewer_url(srv.server_address[1], opts.aspect, opts.cam))
             try:
-                page.wait_for_function("() => !!window.otrvRender", timeout=30_000)
+                page.wait_for_function("() => !!window.otrvRender", timeout=API_TIMEOUT_S * 1000)
             except Exception as e:
                 raise SystemExit(
-                    "this viewer has no render API (window.otrvRender with ?render=1); "
-                    "update viewer/index.html" + ("; page errors: " + " | ".join(errors[-3:]) if errors else "")
+                    f"the viewer page did not expose window.otrvRender within {API_TIMEOUT_S} s "
+                    "(otrv render needs viewer v2, which loads three.js/Spark from a CDN: check your connection)"
+                    + ("; page errors: " + " | ".join(errors[-3:]) if errors else "")
                 ) from e
             duration = page.evaluate(
                 "async () => { await window.otrvRender.ready; return window.otrvRender.duration; }"
@@ -347,6 +359,7 @@ def run(work: Path, viewer_html: bytes, opts: Options) -> Path:
         enhance.require_license(opts.accept_license)
         if opts.enhance == "difix-ref" and not any(images.glob("*.jpg")):
             raise SystemExit(f"--enhance difix-ref needs the real camera frames in {images} (from `otrv prep`)")
+    check_viewer(viewer_html)
     manifest = frames / "manifest.json"
     fp = _fingerprint(viewer_dir, opts)
     if frames.exists() and (not manifest.exists() or json.loads(manifest.read_text()) != fp):

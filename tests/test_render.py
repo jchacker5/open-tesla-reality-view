@@ -1,7 +1,9 @@
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -156,6 +158,21 @@ def test_render_difix_ref_needs_camera_frames_before_capture(work, monkeypatch):
     assert "needs the real camera frames" in msg and "images/front" in msg
 
 
+def test_render_needs_viewer_v2_before_capture(work, monkeypatch):
+    """A viewer page without the render API (viewer v1) fails at once, before a browser is launched."""
+    monkeypatch.setattr(render, "capture", lambda *a: pytest.fail("captured with a viewer that has no render API"))
+    with pytest.raises(SystemExit, match="needs viewer v2"):
+        render.run(work, b"<html>viewer v1</html>", render.Options(out=work / "x.mp4"))
+    msg = _run("render", "a", "--viewer", str(_page(work, b"<html>old viewer</html>")))
+    assert "needs viewer v2" in msg and "window.otrvRender" in msg
+
+
+def _page(work, html: bytes):
+    p = work / "page.html"
+    p.write_bytes(html)
+    return p
+
+
 def test_render_flags_reach_options(work, monkeypatch):
     got = {}
     monkeypatch.setattr(render, "run", lambda w, page, opts: got.update(work=w, opts=opts))
@@ -197,19 +214,40 @@ window.otrvRender = {
 </script></body></html>"""
 
 
-@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright not installed (extra: render)")
+REQUIRE_BROWSER = bool(os.environ.get("OTRV_REQUIRE_RENDER_TEST"))  # CI: a missing browser is a failure
+needs_browser = pytest.mark.skipif(
+    importlib.util.find_spec("playwright") is None and not REQUIRE_BROWSER,
+    reason="playwright not installed (extra: render)",
+)
+
+
+def _render(work, page, opts):
+    try:
+        return render.run(work, page, opts)
+    except Exception as e:  # browser binary not downloaded: `playwright install chromium`
+        if not REQUIRE_BROWSER and ("Executable doesn't exist" in str(e) or "playwright install" in str(e)):
+            pytest.skip("Chromium for Playwright not installed")
+        raise
+
+
+@needs_browser
+def test_render_fails_fast_when_the_page_never_defines_the_api(work, monkeypatch):
+    monkeypatch.setattr(render, "API_TIMEOUT_S", 1)
+    page = b"<html><body><canvas></canvas><!-- otrvRender is mentioned but never defined --></body></html>"
+    t0 = time.monotonic()
+    with pytest.raises(SystemExit, match="did not expose window.otrvRender within 1 s"):
+        _render(work, page, render.Options(out=work / "x.mp4", size=(160, 90), swiftshader=True))
+    assert time.monotonic() - t0 < 20  # browser start + 1 s, not the old 30 s wait
+
+
+@needs_browser
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
 def test_render_loop_with_fake_viewer(work, capsys):
     out = work / "render.mp4"
     opts = render.Options(
         out=out, fps=4, size=(160, 90), aspect="16:9", cam="driver", keep_frames=True, swiftshader=True
     )
-    try:
-        render.run(work, FAKE_VIEWER, opts)
-    except Exception as e:  # browser binary not downloaded: `playwright install chromium`
-        if "Executable doesn't exist" in str(e) or "playwright install" in str(e):
-            pytest.skip("Chromium for Playwright not installed")
-        raise
+    _render(work, FAKE_VIEWER, opts)
     splat = sorted((work / "render" / "splat").glob("*.png"))
     overlay = sorted((work / "render" / "overlay").glob("*.png"))
     assert [p.name for p in splat] == ["00000.png", "00001.png", "00002.png", "00003.png"]

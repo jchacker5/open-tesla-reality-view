@@ -7,6 +7,11 @@ Gaussian splat shows.
 
 ## Setup
 
+**Needs viewer v2.** `otrv render` drives the viewer's render API (`window.otrvRender`, opened with
+`?render=1`), which arrives with viewer v2 (PR #15). With an older `viewer/index.html` it stops at once
+with "otrv render needs viewer v2", before launching a browser; if the page never defines the API (for
+example the CDN is unreachable) it gives up after 10 s.
+
 ```sh
 uv sync --extra render                 # Playwright (Python)
 uv run playwright install chromium     # its Chromium build (~150 MB, once)
@@ -131,7 +136,10 @@ carry no label.
 
 ## Troubleshooting
 
-- **"this viewer has no render API"**: the viewer page predates `?render=1`; update the repo.
+- **"otrv render needs viewer v2"**: the viewer page predates the render API (`?render=1`,
+  `window.otrvRender`); update to viewer v2 (PR #15).
+- **"did not expose window.otrvRender within 10 s"**: the page failed to load (often the CDN for
+  three.js/Spark); the message includes the page errors.
 - **"Chromium has no WebGL here"**: on a machine without a GPU, pass `--swiftshader`.
 - **Executable doesn't exist**: run `uv run playwright install chromium`.
 - **Black or empty frames**: the renderer falls back to element screenshots when the WebGL

@@ -86,9 +86,9 @@ prints the size and your free space, and stops if it won't fit.
 **Render a video.** `otrv render drive1` writes `work/drive1/render.mp4`: a 1080p chase-cam
 flight along your drive, rendered by the viewer in headless Chromium. `--aspect 9:16` makes a
 vertical short, `--aspect 1:1` a square loop, `--cam driver|orbit` changes the camera. Needs
-`uv sync --extra render` and `uv run playwright install chromium`. `--enhance difix` adds an
-optional AI clean-up pass with NVIDIA Difix (about 6 s per frame on an M4; frames are labelled
-"AI-enhanced"). Difix is under NVIDIA's **non-commercial** license, not MIT, so it is a separate
+`uv sync --extra render` and `uv run playwright install chromium`, and viewer v2 (PR #15), whose
+render API it drives. `--enhance difix` adds an optional AI clean-up pass with NVIDIA Difix (about
+6 s per frame on an M4; frames are labelled "AI-enhanced"). Difix is under NVIDIA's **non-commercial** license, not MIT, so it is a separate
 extra and asks you to accept its terms first. See [docs/RENDER.md](docs/RENDER.md).
 
 **Getting good results.** Pick 15-30 s at 10-40 mph past buildings, trees and signs, in daylight

@@ -196,7 +196,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { buildCar, DIMS } from "./car.js";
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
@@ -264,6 +263,13 @@ if (plyHead === 404) {
     "Run <code>tsplat recon &lt;work-dir&gt;</code> (it trains and copies the splat into <code>viewer/</code>), or copy a trained <code>.ply</code> there.");
   await halt();
 }
+// the car lives in car.js next to this page; a copy of the viewer without it gets a clear error card
+const carMod = await import("./car.js").catch((e) => ({ error: e }));
+if (carMod.error) {
+  showError("car.js is missing", "The viewer needs <code>car.js</code> next to <code>index.html</code> (copy every file from the repo's <code>viewer/</code> folder).");
+  await halt();
+}
+const { buildCar, fitModelCar, DIMS } = carMod;
 const M = 1 / path.metresPerUnit;          // metres -> scene units
 const UP = new THREE.Vector3(...path.up);
 const frames = path.frames.map((f) => ({ t: f.t, p: new THREE.Vector3(...f.p), f: new THREE.Vector3(...f.f) }));
@@ -669,12 +675,14 @@ let clock = 0, playing = false, rate = 1, last = performance.now();
 const RATES = [0.5, 1, 2, 4];
 $("play").onclick = togglePlay;
 $("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; videos.forEach((v) => v.playbackRate = rate); };
-// keyboard: Space play (horn while driving) · <- / -> +-2 s (steer while driving) · 1/2/3/4 modes ·
+// keyboard: Space play (handbrake while driving) · <- / -> +-2 s (steer while driving) · 1/2/3/4 modes ·
 // U UI · F fullscreen · M mute · R reset view · H horn · V cycle camera · L headlights · P pause drive
 addEventListener("keydown", (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const onRange = e.target?.type === "range", drv = mode === "drive";
-  if (e.target?.tagName === "BUTTON" && (e.code === "Space" || e.code === "Enter")) return; // let buttons click
+  // let focused buttons click with Space / Enter, except while driving (Space is the handbrake there)
+  if (e.target?.tagName === "BUTTON" && (e.code === "Enter" || (e.code === "Space" && !drv))) return;
+  if (drv && e.target?.tagName === "BUTTON") e.target.blur();
   keys.add(e.code);
   switch (e.code) {
     case "Space": e.preventDefault(); if (!drv) togglePlay(); break;
@@ -842,12 +850,19 @@ function updateKeyLight() {
 // collision.json (bilinear lookups); without it the recorded path is the ground and a soft corridor
 // (~9 m soft / 11 m hard from the path) keeps the car where the splat actually exists.
 //
-// Ground frame (shared with collision.json): Y = path.json "up"; Z = the horizontal part of the first
-// path.json heading (frames[0].f with its up component removed, normalised); X = Y x Z. A scene point P
-// has ground coordinates (x, y, z) = (P.X, P.Y, P.Z), all in SCENE UNITS (not metres). collision.json:
-//   { "cell": c, "x0", "z0", "nx", "nz", "height": [nz*nx, row-major: height[j*nx + i] at x = x0 + i*c,
-//     z = z0 + j*c, value = ground y], "wallCell", "wx0", "wz0", "wnx", "wnz",
-//     "wallDist": [wnz*wnx row-major, distance in scene units to the nearest wall; <= 0 inside walls] }
+// Internal ground frame: GY = path.json "up"; GZ = the horizontal part of the first path.json heading;
+// GX = GY x GZ (the car's left). Drive state x / z are metres along GX / GZ; heights are scene units.
+//
+// collision.json (optional, next to scene.ply), two height-field grids, row-major:
+//   { "cell", "x0", "z0", "nx", "nz", "height": [nz*nx]   height[j*nx + i] = ground height at
+//                                                          (x0 + i*cell, z0 + j*cell)
+//     "wallCell", "wx0", "wz0", "wnx", "wnz", "wallDist": [wnz*wnx]   signed distance to the nearest
+//                                                          wall (<= 0 inside a wall / off the road)
+//     "basis": { "origin": [3], "right": [3], "up": [3], "fwd": [3] },  "metresPerUnit": m }
+// With "basis", a scene point P maps to grid coordinates x = (P - origin).right, z = (P - origin).fwd,
+// height = (P - origin).up, and all grid numbers (cell, x0, z0, height, wallDist) are METRES when
+// "metresPerUnit" is present (scene units x metresPerUnit), scene units otherwise. Without "basis"
+// the legacy frame is used: x / z / height are the scene point's GX / GZ / GY components in scene units.
 // =================================================================================================
 const GY = UP.clone();
 const GZ = frames[0].f.clone().addScaledVector(UP, -frames[0].f.dot(UP)).normalize();
@@ -881,8 +896,33 @@ async function loadCollision() {
   collTried = true;
   try {
     const r = await fetch("collision.json");
-    if (r.ok) { COLL = await r.json(); toast("collision.json loaded: ground + walls"); }
-  } catch {}
+    if (r.ok) { COLL = prepCollision(await r.json()); if (COLL) toast("collision.json loaded: ground + walls"); }
+  } catch (e) { console.warn("collision.json ignored:", e); }
+}
+// normalise collision.json into lookups in the internal frame: grid(x, z) maps ground metres to grid x / z,
+// hToScene(v) turns a grid height into a GY height (scene units), dToM(v) a grid distance into metres
+function prepCollision(c) {
+  const okGrid = (a, nx, nz) => Array.isArray(a) && nx > 1 && nz > 1 && a.length >= nx * nz;
+  const hasH = okGrid(c.height, c.nx, c.nz), hasW = okGrid(c.wallDist, c.wnx, c.wnz);
+  if (!hasH && !hasW) return null;
+  const metric = !!c.basis && c.metresPerUnit > 0;
+  const k = metric ? +c.metresPerUnit : 1; // grid units per scene unit
+  let O = new THREE.Vector3(), R = GX.clone(), U = GY.clone(), F = GZ.clone();
+  if (c.basis) {
+    O = new THREE.Vector3(...c.basis.origin);
+    R = new THREE.Vector3(...c.basis.right).normalize();
+    U = new THREE.Vector3(...c.basis.up).normalize();
+    F = new THREE.Vector3(...c.basis.fwd).normalize();
+  }
+  const P = new THREE.Vector3();
+  // a grid point (gx, gz, gh) sits at O + (gx R + gh U + gz F) / k in scene space; we need its GY part
+  const oy = O.dot(GY), ry = R.dot(GY), uy = U.dot(GY) || 1, fy = F.dot(GY);
+  return {
+    ...c, height: hasH ? c.height : null, wallDist: hasW ? c.wallDist : null,
+    grid: (x, z) => { fromGround(x, z, 0, P).sub(O); return [P.dot(R) * k, P.dot(F) * k]; },
+    hToScene: (gh, gx, gz) => oy + (gx * ry + gh * uy + gz * fy) / k,
+    dToM: (v) => (metric ? v : v / M),
+  };
 }
 function bilinear(arr, nx, nz, x0, z0, cell, gx, gz) {
   const fx = clamp((gx - x0) / cell, 0, nx - 1.001), fz = clamp((gz - z0) / cell, 0, nz - 1.001);
@@ -890,12 +930,15 @@ function bilinear(arr, nx, nz, x0, z0, cell, gx, gz) {
   const a = arr[j * nx + i], b = arr[j * nx + i + 1], c = arr[(j + 1) * nx + i], d = arr[(j + 1) * nx + i + 1];
   return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
 }
-// ground height (scene units) at ground metres (x, z)
+// ground height (scene units along GY) at ground metres (x, z)
 function groundH(x, z, hint) {
-  if (COLL?.height) return bilinear(COLL.height, COLL.nx, COLL.nz, COLL.x0, COLL.z0, COLL.cell, x * M, z * M);
+  if (COLL?.height) {
+    const [gx, gz] = COLL.grid(x, z);
+    return COLL.hToScene(bilinear(COLL.height, COLL.nx, COLL.nz, COLL.x0, COLL.z0, COLL.cell, gx, gz), gx, gz);
+  }
   return pathQuery(x, z, hint).h;
 }
-const wallDistM = (x, z) => bilinear(COLL.wallDist, COLL.wnx, COLL.wnz, COLL.wx0, COLL.wz0, COLL.wallCell, x * M, z * M) / M;
+const wallDistM = (x, z) => COLL.dToM(bilinear(COLL.wallDist, COLL.wnx, COLL.wnz, COLL.wx0, COLL.wz0, COLL.wallCell, ...COLL.grid(x, z)));
 
 const DRV = { L: CAR.wheelZ * 2, mass: 1900, force: 14000, vmax: 50, brake: 12, revMax: 12, track: 1.6, hz: 120,
   soft: 9, hard: 11, respawn: 3 };
@@ -906,7 +949,7 @@ function driveReset(t = clock, speed = null) {
   const ps = poseAt(t), g = toGround(ps.carPos);
   const s = telAt(t), u = speed ?? (s ? s.mph / 2.23694 : 0);
   Object.assign(drive, { x: g.x, z: g.z, psi: Math.atan2(ps.f.dot(GX), ps.f.dot(GZ)), r: 0, delta: 0, yAbs: g.h / M, yv: 0,
-    aLong: 0, aLat: 0, slip: 0, out: 0, acc: 0, steps: 0, hint: -1, stopT: 0, u, gear: "D" });
+    aLong: 0, aLat: 0, slip: 0, out: 0, acc: 0, steps: 0, hint: -1, stopT: 0, u, parked: u < 0.1, gear: u < 0.1 ? "P" : "D" });
   drive.vx = Math.sin(drive.psi) * u; drive.vz = Math.cos(drive.psi) * u;
   drive.hint = pathQuery(drive.x, drive.z).i;
   drive.prev = snapDrive();
@@ -942,7 +985,7 @@ function driveStep(h, inp) {
   if (thr === 0 && brk === 0 && Math.abs(u) < 0.25) u = 0;
   if (Math.sign(u) !== Math.sign(uPrev) && uPrev !== 0 && thr === 0 && brk > 0 && uPrev > 0) u = 0; // brakes stop, don't reverse instantly
   // lateral grip decay (handbrake frees the rear = drift); yaw from the bicycle model
-  w *= Math.exp(-(inp.handbrake ? 9 / 1.8 : 9) * h);
+  w *= Math.exp(-(inp.handbrake ? 1.8 : 9) * h);
   const rKin = (u / DRV.L) * Math.tan(drive.delta) * (inp.handbrake ? 1.4 : 1);
   drive.r += (rKin - drive.r) * (1 - Math.exp(-14 * h));
   drive.psi += drive.r * h;
@@ -991,6 +1034,7 @@ function driveStep(h, inp) {
   if (drive.out > DRV.respawn) {                                          // auto-respawn on the path
     drive.x = q.px; drive.z = q.pz; drive.psi = Math.atan2(q.tx, q.tz); drive.vx = drive.vz = drive.r = 0; drive.out = 0;
     drive.yAbs = groundH(drive.x, drive.z, q.i) / M; drive.yv = 0;
+    drive.respawns = (drive.respawns ?? 0) + 1;
     toast("Back on the reconstructed road");
   }
   // ground: four samples (+-1.45 m fore/aft, +-0.8 m lateral) give height, pitch and roll
@@ -1007,7 +1051,8 @@ function driveStep(h, inp) {
   const speed = Math.hypot(drive.vx, drive.vz);
   drive.spin += (u / CAR.wheelR) * h;
   drive.brakeLit = brk > 0.05 && u > 0.3;
-  drive.gear = u < -0.2 || (Math.abs(u) <= 0.2 && brk > 0.05 && thr === 0) ? "R" : "D";
+  if (thr > 0.05 || brk > 0.05) drive.parked = false;
+  drive.gear = drive.parked ? "P" : u < -0.2 || (Math.abs(u) <= 0.2 && brk > 0.05 && thr === 0) ? "R" : "D";
   drive.u = u; drive.speed = speed; drive.d = q.d;
 }
 function driveAdvance(dt, inp) {
@@ -1019,7 +1064,11 @@ function driveAdvance(dt, inp) {
 }
 // test hook: advance the model by dt seconds (fixed 120 Hz steps) with an explicit input
 window.otrvDrive = {
-  get state() { return { x: drive.x, z: drive.z, heading: drive.psi, speed: drive.u ?? 0, steer: drive.delta, gear: drive.gear, yawRate: drive.r, distFromPath: drive.d ?? 0 }; },
+  get state() {
+    return { x: drive.x, z: drive.z, heading: drive.psi, speed: drive.u ?? 0, steer: drive.delta, gear: drive.gear, yawRate: drive.r,
+      slip: drive.slip, distFromPath: drive.d ?? 0, respawns: drive.respawns ?? 0, pos: fromGround(drive.x, drive.z, drive.yAbs * M).toArray(), collision: !!COLL };
+  },
+  loadCollision: () => loadCollision(),
   reset: (t, speed) => driveReset(t ?? clock, speed),
   set bounds(on) { drive.bounds = !!on; },
   step(dt, input = {}) {
@@ -1070,8 +1119,8 @@ function readInput(dt) {
   kb.thr = approach(kb.thr, k("KeyW", "ArrowUp") ? 1 : 0, 6, 10);
   kb.brk = approach(kb.brk, k("KeyS", "ArrowDown") ? 1 : 0, 8, 12);
   const inp = { throttle: Math.max(kb.thr, touch.thr), brake: Math.max(kb.brk, touch.brk), steer: Math.abs(touch.steer) > Math.abs(kb.steer) ? touch.steer : kb.steer,
-    handbrake: k("KeyX") || touch.hb, boost: k("ShiftLeft", "ShiftRight") };
-  let horn = k("KeyH") || (mode === "drive" && k("Space"));
+    handbrake: k("KeyX") || (mode === "drive" && k("Space")) || touch.hb, boost: k("ShiftLeft", "ShiftRight") };
+  let horn = k("KeyH");
   drive.lookBehind = k("KeyC");
   // gamepads: poll every frame (never cache the Gamepad objects); trust only the standard mapping
   for (const pad of navigator.getGamepads?.() ?? []) {
@@ -1084,14 +1133,14 @@ function readInput(dt) {
     if (Math.abs(steer) > Math.abs(inp.steer)) inp.steer = steer;
     inp.throttle = Math.max(inp.throttle, b(7).value);
     inp.brake = Math.max(inp.brake, b(6).value);
-    inp.handbrake ||= b(2).pressed || b(5).pressed;
-    horn ||= b(1).pressed;
+    inp.handbrake ||= b(0).pressed || b(5).pressed;                                     // A / RB: handbrake
+    horn ||= b(1).pressed;                                                              // B: horn
     drive.lookBehind ||= b(11).pressed;
     const [rx, ry] = deadzone(pad.axes[2] ?? 0, pad.axes[3] ?? 0);
     if (rx || ry) { view.yaw -= rx * 2.6 * dt; view.pitch = clamp(view.pitch + ry * 1.6 * dt, -0.5, 0.9); view.idle = 0; }
     if (edge(9)) setMode(mode === "drive" ? "chase" : "drive");                       // Start: drive on/off
     if (edge(3)) cycleCamera();                                                         // Y: cycle camera
-    if (edge(0) && mode === "drive") setHeadlights(!drive.headlights);                  // A: headlights
+    if (edge(2) && mode === "drive") setHeadlights(!drive.headlights);                  // X: headlights
     if (edge(8) && mode !== "drive") togglePlay();                                      // Back: play/pause
     if (mode === "drive" && b(6).value > 0.8 && (drive.u ?? 0) > 8 && drive.steps % 18 === 0) rumble(0.35, 90); // hard braking
     padPrev[pad.index] = pad.buttons.map((x) => x.pressed);
@@ -1162,7 +1211,7 @@ function driveEnter() {
   drive.cam = "chase";
   $("tDrive").hidden = !matchMedia("(pointer: coarse)").matches;
   $("minimap").hidden = false;
-  toast(matchMedia("(pointer: coarse)").matches ? "Drive: joystick to steer, GAS / BRK" : "Drive: W/A/S/D or arrows · Shift boost · X handbrake · H horn · C look back", 3200);
+  toast(matchMedia("(pointer: coarse)").matches ? "Drive: joystick to steer, GAS / BRK" : "Drive: W/A/S/D or arrows · Shift boost · Space handbrake · H horn · C look back", 3200);
 }
 function driveExit() {
   $("tDrive").hidden = true;
@@ -1233,7 +1282,7 @@ function driveFrame(rdt) {
     brake: drive.brakeLit, blinkL: false, blinkR: false }, clock);
   setHidden("edge", (drive.edge ?? 0) < 0.05);
   if ((drive.edge ?? 0) >= 0.05) $("edge").style.opacity = String(0.35 + 0.65 * drive.edge);
-  if ((drive.d ?? 0) > DRV.soft && !COLL?.wallDist) { if (!edgeToastShown) { toast("Leaving reconstructed area", 2400); edgeToastShown = true; } }
+  if ((drive.d ?? 0) > DRV.soft && !COLL?.wallDist) { if (!edgeToastShown) { toast("Leaving the reconstructed area", 2400); edgeToastShown = true; } }
   else edgeToastShown = false;
   if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(); // ~20 Hz is plenty
   sound.update({ speed: Math.abs(drive.u ?? 0), throttle: inp.throttle, slip: drive.slip, reverse: drive.gear === "R" && Math.abs(drive.u ?? 0) > 0.05 || (drive.gear === "R" && inp.brake > 0.05), drive: true });

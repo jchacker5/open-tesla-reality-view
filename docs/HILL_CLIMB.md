@@ -93,7 +93,7 @@ the format is documented in `tsplat/collision.py`.
 
 COLMAP's rig mapper runs on every frame. The alternative, SfM at 3 fps and then registering the
 other frames with `image_registrator` + `bundle_adjuster`, wasn't needed: the full rig SfM at 6 fps
-costs ~3x the 3 fps SfM (below), and it keeps the rig constraint (a COLMAP 4 frame is all cameras at
+costs ~2.5-3x the 3 fps SfM (below), and it keeps the rig constraint (a COLMAP 4 frame is all cameras at
 one instant) on every frame instead of registering images one at a time. The match windows
 (same camera: 5 frames, neighbouring cameras: +-8 frames at 3 fps) are scaled by fps/3 so they cover
 the same time, which makes ~4x the pairs at 6 fps.
@@ -106,7 +106,7 @@ Measured on the low-resolution smoke clip (6 cameras, 20 s, M4 32 GB, CPU SIFT):
 | features | 0.09 min | 0.15 min |
 | matching | 0.39 min | 1.41 min |
 | mapper | 0.84 min | 2.43 min |
-| SfM total | ~1.3 min | ~4.0 min (3x) |
+| SfM total | ~1.3 min | 3.0-4.0 min over two runs (2.5-3x) |
 
 Real 1280-wide footage has more features per image, so expect "a few minutes" at 3 fps to become
 10-15 at 6 fps: still small next to ~75 min of training at 30k steps. If it isn't, `--fps 4` is the

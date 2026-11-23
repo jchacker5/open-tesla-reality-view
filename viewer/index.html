@@ -249,6 +249,10 @@ function updateRibbon(t) {
 // ---- camera modes ----
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enabled = false;
+// free orbit: stay above the road and within a sensible range of the car
+controls.maxPolarAngle = Math.PI * 0.47;
+controls.minDistance = 3 * M;
+controls.maxDistance = 80 * M;
 let mode = "chase";
 const smoothPos = new THREE.Vector3(), smoothLook = new THREE.Vector3();
 let first = true;

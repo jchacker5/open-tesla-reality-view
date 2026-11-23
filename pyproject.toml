@@ -1,7 +1,7 @@
 [project]
 name = "open-tesla-reality-view"
 version = "0.1.0"
-description = "Tesla 6-camera dashcam -> 3D Gaussian splat replay"
+description = "Tesla dashcam (4 or 6 cameras) -> 3D Gaussian splat replay"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26", "pillow>=10", "scipy>=1.11"]
 

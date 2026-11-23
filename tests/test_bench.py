@@ -192,3 +192,33 @@ def test_floaters_card_and_seed_in_ledger(tmp_path, monkeypatch):
     assert "floaters" not in m["errors"]
     logged = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
     assert logged["floaters"]["raw"] == 2 and logged["config"]["seed"] == 7
+
+
+def _textured(h=40, w=20, seed=0):
+    return np.random.default_rng(seed).integers(40, 200, (h, w, 3)).astype(np.uint8)
+
+
+def test_ground_truth_is_dense_base_not_the_colour_normalised_dense(tmp_path):
+    """--color-norm rewrites dense/images; bench must keep scoring against the untouched dense_base/."""
+    work = tmp_path / "run"
+    truth = _textured()
+    for root, img in (("dense_base", truth), ("dense", np.clip(truth.astype(int) + 60, 0, 255).astype(np.uint8))):
+        (work / root / "images" / "front").mkdir(parents=True)
+        Image.fromarray(img).save(work / root / "images" / "front" / "front_00008.png")
+    (work / "splat" / "eval_100").mkdir(parents=True)
+    Image.fromarray(truth).save(work / "splat" / "eval_100" / "front_00008.png")
+    v = bench.view_metrics(work, {"eval": True, "steps": 100})
+    assert v["psnr"]["gt"] == "dense_base" and v["psnr"]["overall"] > 40
+
+
+def test_colour_corrected_psnr_factors_out_exposure(tmp_path):
+    work = tmp_path / "run"
+    (work / "dense" / "images" / "front").mkdir(parents=True)
+    (work / "splat" / "eval_100").mkdir(parents=True)
+    truth = _textured()
+    Image.fromarray(truth).save(work / "dense" / "images" / "front" / "front_00008.png")
+    darker = (truth.astype(np.float32) * 0.7 + 10).astype(np.uint8)  # an exposure/offset difference only
+    Image.fromarray(darker).save(work / "splat" / "eval_100" / "front_00008.png")
+    v = bench.view_metrics(work, {"eval": True, "steps": 100})
+    assert v["psnr"]["overall"] < 25 and v["psnr_cc"]["overall"] > 40
+    assert v["psnr_cc"]["per_cam"]["front"] == v["psnr_cc"]["overall"]

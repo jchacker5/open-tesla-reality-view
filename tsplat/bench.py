@@ -3,8 +3,13 @@
 Metrics (all from files a `recon` run leaves behind):
   registration   share of sampled frames per camera that SfM placed in the model
   reproj_px      mean reprojection error of the sparse model
-  psnr_db        masked PSNR of held-out views (every 8th frame), per camera and overall
-                 (needs `recon --eval`); ego/mover masks and sky (when recon saved sky masks) don't count
+  psnr_db        masked PSNR of held-out views, per camera and overall (needs `recon --eval`); ego/mover
+                 masks and sky (when recon saved sky masks) don't count. Ground truth is the untouched
+                 undistorted image in dense_base/ (before --color-norm or --sky rewrote dense/), so a
+                 lever can't change the images it is scored against
+  psnr_cc        the same PSNR after a per-image affine colour fit (3x4, least squares on the scored
+                 pixels) of the render to the ground truth: geometry/texture quality with exposure and
+                 white-balance differences factored out
   lpips          masked LPIPS (AlexNet) of the same views (needs `uv sync --extra quality`, else skipped)
   road           PSNR and LPIPS on the bottom 35% of each held-out view, inside the mask
   floaters       splats with opacity > 0.1 inside the ego swept tube (1 m either side of the path,
@@ -153,6 +158,23 @@ def _psnr(pred: np.ndarray, gt: np.ndarray, keep: np.ndarray) -> float | None:
     return float(10 * np.log10(1 / max(mse, 1e-10)))
 
 
+def _colour_fit(pred: np.ndarray, gt: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """pred mapped through the affine colour transform (rgb -> A rgb + b) that best fits gt on `keep`."""
+    if keep.sum() < 16:
+        return pred
+    X = np.concatenate([pred[keep], np.ones((int(keep.sum()), 1), np.float32)], 1)
+    M = np.linalg.lstsq(X, gt[keep], rcond=None)[0]  # (4, 3)
+    out = np.concatenate([pred, np.ones(pred.shape[:2] + (1,), np.float32)], 2) @ M
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
+def gt_root(work: Path) -> Path:
+    """Where held-out ground truth comes from: dense_base/ (undistorted, never edited by a lever), or
+    dense/ for runs from before dense_base/ existed."""
+    base = work / "dense_base"
+    return base if (base / "images").is_dir() else work / "dense"
+
+
 def _mean(vals: list) -> float | None:
     vals = [v for v in vals if v is not None]
     return float(np.mean(vals)) if vals else None
@@ -173,7 +195,7 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
     evals = work / "splat" / f"eval_{steps}"
     if not evals.is_dir():
         raise FileNotFoundError(f"recon ran with --eval but {evals} is missing (Brush saved no eval renders)")
-    dense = work / "dense"
+    dense = gt_root(work)
     rows: dict[str, list[dict]] = {}
     sky_excluded = False
     for render in sorted(evals.glob("*.png")):
@@ -188,7 +210,11 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
         sky_excluded |= has_sky
         band = np.zeros_like(keep)
         band[int(round(keep.shape[0] * (1 - ROAD_BAND))) :] = True
-        r = {"psnr": _psnr(pred, gt, keep), "road_psnr": _psnr(pred, gt, keep & band)}
+        r = {
+            "psnr": _psnr(pred, gt, keep),
+            "psnr_cc": _psnr(_colour_fit(pred, gt, keep), gt, keep),
+            "road_psnr": _psnr(pred, gt, keep & band),
+        }
         if lpips_fn is not None:
             d = lpips_fn(pred, gt)
             r["lpips"] = float(d[keep].mean()) if keep.any() else None
@@ -205,7 +231,15 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
     p_all, p_cam = agg("psnr", 2)
     views = sum(len(v) for v in rows.values())
     out = {
-        "psnr": {"step": steps, "overall": p_all, "per_cam": p_cam, "views": views, "sky_excluded": sky_excluded},
+        "psnr": {
+            "step": steps,
+            "overall": p_all,
+            "per_cam": p_cam,
+            "views": views,
+            "sky_excluded": sky_excluded,
+            "gt": dense.name,
+        },
+        "psnr_cc": dict(zip(("overall", "per_cam"), agg("psnr_cc", 2), strict=True)),
         "lpips": None,
         "road": {"band": ROAD_BAND, "psnr": agg("road_psnr", 2)[0], "lpips": None},
     }
@@ -307,7 +341,11 @@ def card(m: dict) -> str:
     env = m.get("env") or {}
     if p:
         sky = ", sky excluded" if p.get("sky_excluded") else ""
-        psnr_line = f"- held-out PSNR: {p['overall']} dB over {p['views']} views ({per_cam}){sky}"
+        cc = m.get("psnr_cc") or {}
+        psnr_line = (
+            f"- held-out PSNR: {p['overall']} dB over {p['views']} views ({per_cam}){sky}; "
+            f"colour-corrected {cc.get('overall')} dB; ground truth {p.get('gt', 'dense')}/"
+        )
         lpips_line = (
             f"- held-out LPIPS: {lp['overall']} ({', '.join(f'{c} {v}' for c, v in lp['per_cam'].items())})"
             if lp
@@ -381,6 +419,7 @@ def run(name: str, note: str = "", workdir: str = "work") -> dict:
     m["sparse"] = attempt("sparse", lambda: reprojection(_sfm_model(work)), {})
     views = attempt("psnr", lambda: view_metrics(work, args, lpips_model() if args.get("eval") else None)) or {}
     m["psnr"], m["lpips"], m["road"] = views.get("psnr"), views.get("lpips"), views.get("road")
+    m["psnr_cc"] = views.get("psnr_cc")
     m["floaters"] = attempt("floaters", lambda: floater_stats(work, args))
     cl = attempt("clean", lambda: _read_json(work / "clean.json"), {})
     m["clean"] = {k: cl[k] for k in ("before", "after", "removed") if k in cl}

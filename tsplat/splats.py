@@ -6,7 +6,8 @@ order; `write_ply` writes them all back as binary little-endian float32, so a pr
 whatever the trainer exported (SH degree, normals, extra fields).
 
 Scene space is COLMAP's world frame in arbitrary units. viewer/path.json gives `up` (unit vector),
-`metresPerUnit` and the front camera's smoothed path `frames[].p`; the road is CAM_HEIGHT_M below it.
+`metresPerUnit` and the front camera's smoothed path `frames[].p`; the road is `camHeight` metres below it
+(fitted to SfM road points by recon, else CAM_HEIGHT_M).
 """
 
 from __future__ import annotations
@@ -149,6 +150,7 @@ class EgoPath:
     P: np.ndarray  # (n, 3) front-camera positions
     up: np.ndarray  # (3,) unit
     mpu: float  # metres per scene unit
+    cam_h: float = CAM_HEIGHT_M  # front camera above the road, metres (path.json "camHeight", fitted per scene)
 
     @classmethod
     def load(cls, path_json: str | Path) -> EgoPath:
@@ -160,11 +162,12 @@ class EgoPath:
         P = np.asarray([f["p"] for f in d["frames"]], float)
         if len(P) < 2:
             raise ValueError("path.json needs at least 2 frames")
-        return cls(P, up / np.linalg.norm(up), float(d.get("metresPerUnit") or 1.0))
+        cam_h = float(d.get("camHeight") or CAM_HEIGHT_M)
+        return cls(P, up / np.linalg.norm(up), float(d.get("metresPerUnit") or 1.0), cam_h)
 
     @property
     def road(self) -> np.ndarray:
-        return self.P - self.up * (CAM_HEIGHT_M / self.mpu)
+        return self.P - self.up * (self.cam_h / self.mpu)
 
     def horizontal_basis(self) -> tuple[np.ndarray, np.ndarray]:
         """(right, fwd): unit vectors perpendicular to `up`; fwd is the path's mean direction."""

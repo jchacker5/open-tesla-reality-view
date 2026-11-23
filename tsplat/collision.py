@@ -3,7 +3,8 @@ clean-up; `otrv collision <name>` and `otrv clean` re-bake it from viewer/scene.
 
 Frame. Everything is in scene units (COLMAP's world units; `metresPerUnit` converts) in a horizontal
 frame built from viewer/path.json:
-  origin  the road under the first path pose (front camera minus 1.4 m along `up`)
+  origin  the road under the first path pose (front camera minus path.json camHeight, fitted per
+          scene, default 1.4 m, along `up`)
   up      path.json's `up`
   fwd     the path's overall direction (last pose minus first), made perpendicular to `up`
   right   fwd x up (to the driver's right)

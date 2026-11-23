@@ -36,9 +36,28 @@ def make_work(tmp_path, n=6, tel=None):
     return work
 
 
+def test_fit_cam_height_from_road_points_despite_outliers():
+    """Path along +z at y = 0, up = -y (COLMAP), 2 scene units per metre; road 1.6 m below with a 2%
+    camber, plus kerbs, a car roof and points far to the side that must not count."""
+    rng = np.random.default_rng(0)
+    P = np.stack([np.zeros(40), np.zeros(40), np.arange(40) * 0.5], 1)
+    up, mpu = np.array([0, -1.0, 0]), 0.5
+    lat = rng.uniform(-3.5, 3.5, 200)
+    road = np.stack([lat, 1.6 + 0.02 * lat, rng.uniform(0, 19, 200)], 1) / mpu
+    road[:, 2] *= mpu  # z already in scene units
+    junk = np.stack([rng.uniform(-3, 3, 60), rng.uniform(0.9, 1.3, 60), rng.uniform(0, 19, 60)], 1)
+    junk[:, :2] /= mpu
+    far = np.stack([np.full(30, 20.0), np.full(30, 1.0), rng.uniform(0, 19, 30)], 1) / mpu
+    h = recon.fit_cam_height(np.concatenate([road, junk, far]), P, up, mpu)
+    assert h == pytest.approx(1.6, abs=0.02)
+    assert recon.fit_cam_height(road[:20], P, up, mpu) is None  # too few to trust: use the default
+    assert recon.fit_cam_height(np.zeros((0, 3)), P, up, mpu) is None
+
+
 def test_export_path_and_nvs(tmp_path):
     work = make_work(tmp_path)
     path = json.loads(recon.export_path(work, work / "dense").read_text())
+    assert path["camHeight"] == 1.4 and path["camHeightSource"] == "default"  # no SfM points here
     assert len(path["frames"]) == 6
     assert np.allclose(path["up"], [0, -1, 0])
     for f in path["frames"]:

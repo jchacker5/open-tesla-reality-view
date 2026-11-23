@@ -11,8 +11,10 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from scipy.spatial import cKDTree
 
 from . import brush
+from .splats import CAM_HEIGHT_M
 
 
 def sh(*args: str) -> None:
@@ -371,10 +373,13 @@ def export_path(work: Path, dense: Path) -> Path:
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
     scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
+    cam_h = fit_cam_height(read_points(dense), Ps, up, scale)
     out = work / "viewer" / "path.json"
     doc = {
         "up": up.round(5).tolist(),
         "metresPerUnit": scale,
+        "camHeight": round(cam_h if cam_h is not None else CAM_HEIGHT_M, 3),  # front camera above the road, m
+        "camHeightSource": "sfm" if cam_h is not None else "default",
         "frames": path,
         "dur": meta["dur"],
         "cams": meta["cams"],
@@ -386,8 +391,65 @@ def export_path(work: Path, dense: Path) -> Path:
     if colours:  # mean real sky colour, sRGB 0-1: the viewer's background gradient
         doc["sky"] = {"top": colours["top"], "horizon": colours["horizon"]}
     out.write_text(json.dumps(doc))
-    print(f"path: {len(path)} poses, {scale:.3f} m/unit -> {out}")
+    print(
+        f"path: {len(path)} poses, {scale:.3f} m/unit, camera {doc['camHeight']} m above the road "
+        f"({doc['camHeightSource']}) -> {out}"
+    )
     return out
+
+
+def read_points(dense: Path) -> np.ndarray:
+    """(n, 3) SfM points from dense/sparse/points3D.txt (empty if there is none)."""
+    f = dense / "sparse" / "points3D.txt"
+    if not f.exists():
+        return np.zeros((0, 3))
+    rows = [line.split()[1:4] for line in f.read_text().splitlines() if line.strip() and not line.startswith("#")]
+    return np.array(rows, float).reshape(-1, 3)
+
+
+def fit_cam_height(
+    pts: np.ndarray, P: np.ndarray, up: np.ndarray, mpu: float, iters: int = 300, seed: int = 0
+) -> float | None:
+    """Front-camera height above the road in metres, from SfM points on the road beside the path.
+
+    Candidates are points within 4 m (horizontally) of a path pose and 0.8-2.5 m below it. RANSAC fits
+    a ribbon plane in path coordinates, drop = h + a * signed lateral offset (a = road camber or
+    camera roll), with 5 cm inliers, then least squares on the inliers. Returns h, or None (use the
+    1.4 m default) when fewer than 30 points support it or h is outside 1.0-2.2 m."""
+    if len(pts) == 0 or len(P) < 2:
+        return None
+    up = up / np.linalg.norm(up)
+    d = P[-1] - P[0]
+    fwd = d - (d @ up) * up
+    fwd /= np.linalg.norm(fwd) + 1e-12
+    right = np.cross(fwd, up)
+    H = np.stack([right, fwd], 1)
+
+    _, idx = cKDTree(P @ H).query(pts @ H)
+    rel = (pts - P[idx]) * mpu
+    lateral = rel @ right
+    lateral_abs = np.linalg.norm(rel @ H, axis=1)
+    drop = -(rel @ up)
+    cand = (lateral_abs <= 4.0) & (drop >= 0.8) & (drop <= 2.5)
+    if cand.sum() < 30:
+        return None
+    s, y = lateral[cand], drop[cand]
+    rng = np.random.default_rng(seed)
+    best, best_n = None, 0
+    for _ in range(iters):
+        i, j = rng.choice(len(s), 2, replace=False)
+        if abs(s[i] - s[j]) < 0.2:
+            continue
+        a = (y[i] - y[j]) / (s[i] - s[j])
+        h = y[i] - a * s[i]
+        n = int((np.abs(h + a * s - y) < 0.05).sum())
+        if abs(a) < 0.15 and n > best_n:
+            best, best_n = (h, a), n
+    if best is None or best_n < 30:
+        return None
+    inl = np.abs(best[0] + best[1] * s - y) < 0.05
+    h, _ = np.linalg.lstsq(np.stack([np.ones(inl.sum()), s[inl]], 1), y[inl], rcond=None)[0]
+    return float(h) if 1.0 <= h <= 2.2 else None
 
 
 def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float = 4.2, ahead_m: float = 14.0) -> Path:
@@ -438,7 +500,7 @@ def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float =
         p = np.array([np.interp(t, ts, P[:, k]) for k in range(3)])
         f = np.array([np.interp(t, ts, F[:, k]) for k in range(3)])
         f /= np.linalg.norm(f)
-        road = p - up * 1.4 * u
+        road = p - up * path.get("camHeight", CAM_HEIGHT_M) * u
         eye = road - f * back_m * u + up * up_m * u
         z = road + f * ahead_m * u + up * 1.0 * u - eye
         z /= np.linalg.norm(z)

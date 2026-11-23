@@ -71,7 +71,7 @@
   .tStick { width: 120px; height: 120px; border-radius: 50%; background: rgba(16,18,22,.5); border: 1px solid var(--line); display: grid; place-items: center; pointer-events: auto; touch-action: none; }
   .tKnob { width: 52px; height: 52px; border-radius: 50%; background: rgba(232,234,238,.85); }
   .tBtns { display: flex; gap: 10px; pointer-events: auto; }
-  .tBtns button { width: 64px; height: 64px; border-radius: 50%; background: rgba(16,18,22,.6); touch-action: none; font-weight: 700; }
+  .tBtns button { width: 64px; height: 64px; border-radius: 50%; background: rgba(16,18,22,.82); border-color: rgba(232,234,238,.28); touch-action: none; font-weight: 700; }
   .tBtns button.on { background: var(--accent); border-color: var(--accent); }
   /* flags */
   .app.clean, .app.noui { grid-template-columns: 1fr; }
@@ -1492,6 +1492,7 @@ async function buildMapLayer() {
   scene.add(mesh);
   mapLayer.underlay = mesh;
   $("mapAttr").textContent = MAP_ATTR;
+  window.otrvRender.mapCredit = MAP_ATTR; // for exports that show the drone underlay
 }
 const mapBuilt = buildMapLayer().catch((e) => console.warn("map layer failed:", e));
 // the underlay fades in under the drone camera only
@@ -1541,8 +1542,10 @@ function drawMinimap(cx, cz, psi, corridor) {
 }
 function showMinimap(on) {
   setHidden("minimap", !on);
-  setHidden("mapAttr", !(on && mapLayer.ready) && !(mapLayer.underlay?.visible));
+  updateMapAttr();
 }
+// tile attribution whenever tiles are on screen (minimap or underlay)
+function updateMapAttr() { setHidden("mapAttr", !((domCache.get("minimap.hidden") === false && mapLayer.ready) || mapLayer.underlay?.visible)); }
 let edgeToastShown = false, mmFrame = 0;
 function driveFrame(rdt) {
   const inp = readInput(rdt);
@@ -1565,6 +1568,7 @@ function driveFrame(rdt) {
   else edgeToastShown = false;
   if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(drive.x, drive.z, drive.psi, true); // ~20 Hz is plenty
   updateUnderlay(rdt, false);
+  updateMapAttr();
   sound.update({ speed: Math.abs(drive.u ?? 0), throttle: inp.throttle, slip: drive.slip, reverse: drive.gear === "R" && Math.abs(drive.u ?? 0) > 0.05 || (drive.gear === "R" && inp.brake > 0.05), drive: true });
 }
 let playingDrive = true; // Start/pause inside drive mode (P key)
@@ -1752,6 +1756,7 @@ function loop(now) {
   updateKeyLight();
   hud(clock);
   updateUnderlay(rdt, mode === "drone");
+  updateMapAttr();
   if (mode === "drone" && (mmFrame = (mmFrame + 1) % 3) === 0) {
     const g = toGround(ps.carPos);
     drawMinimap(g.x, g.z, Math.atan2(ps.f.dot(GX), ps.f.dot(GZ)), false);
@@ -1785,6 +1790,8 @@ function loop(now) {
  *                     full layers when the clip has GPS (the tiles are background, not overlay).
  *   otrvRender.credit     attribution text of the installed car model ("" for the built-in car), for
  *                         the renderer to stamp on exported video (the on-page credit is hidden here).
+ *   otrvRender.mapCredit  map tile attribution, set once GPS map tiles have loaded (stamp it when
+ *                         exporting cam "drone", which shows the tiles); undefined without a map.
  *   What a call does: sets the clock to t and pauses the camera videos; poses car, lamps, wheels,
  *   ribbon and camera with no smoothing lag (the chase heading spring is simulated from t-3 s at a
  *   fixed 60 Hz, so the image depends only on t); then renders frames until Spark's asynchronous

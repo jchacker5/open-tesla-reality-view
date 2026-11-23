@@ -33,8 +33,9 @@ never leaves your machine.
   people can be masked with YOLO segmentation so they don't leave smears.
 - **Gaussian splat training on your Mac's GPU** with [Brush](https://github.com/ArthurBrussee/brush)
   (Metal).
-- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): chase, driver and free-fly cameras,
-  the raw camera feeds synced on the side, and a telemetry HUD.
+- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): chase, driver, drone and free-fly
+  cameras, the raw camera feeds synced on the side, a telemetry HUD, a GPS street map, and a
+  drive mode where you take the wheel inside the reconstruction (keyboard, gamepad or touch).
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
   signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
@@ -95,6 +96,39 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `view` | local server with byte-range support, so the synced videos can seek |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
+
+## The viewer
+
+`viewer/` is a static page (`index.html` + `car.js`, three.js and Spark from a CDN). Serve the
+folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open it in a browser.
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `Space` | play / pause (handbrake while driving) | `←` `→` | ∓2 s (steer while driving) |
+| `1` `2` `3` | chase, driver, free camera | `5` | drone camera over the street map |
+| `4` | **drive** the car yourself | `R` / double-click | reset the view |
+| `U` | hide the UI | `F` / `M` | fullscreen / mute |
+
+- **Cameras.** Drag to orbit and wheel or pinch to zoom; follow cameras spring back after 2 s.
+  In free mode, right-drag, Shift-drag or two fingers pan.
+- **Drive mode** (`4`, the DRIVE button or gamepad Start). An arcade car model at 120 Hz. Keyboard:
+  W/A/S/D or arrows, Shift boost, Space handbrake, H horn, C look back, V camera. Gamepads with the
+  standard mapping: RT/LT throttle and brake/reverse, left stick steers, A handbrake, B horn,
+  Y camera, right stick looks around. On phones there's a joystick plus gas, brake and handbrake
+  buttons. The car stays near the recorded road, where the splat exists. An optional
+  `collision.json` next to `scene.ply` adds real ground height and walls.
+- **Sound** is synthesised in the browser: motor whine, wind, tyres, horn and a reverse chime.
+  It starts on your first click or key press. You can use your own recordings instead, see
+  [viewer/sounds/README.md](viewer/sounds/README.md).
+- **Your car.** By default the viewer draws a built-in white crossover. With a glTF model in
+  `viewer/models/` (`otrv car fetch` installs one, `otrv view` copies it) the real car is shown,
+  repainted, with working lamps, blinkers and wheels, and its credit is shown at the bottom-left.
+  See [viewer/models/README.md](viewer/models/README.md). Models are never committed.
+- **Map.** With GPS in the clip, the route is placed on Esri's dark street tiles. They show in the
+  minimap and under the drone camera.
+- **Sharing.** `link` copies a `#t=…&cam=…` deep link, `rec` records the 3D view to a `.webm`
+  file. Use `?ui=0`, `?clean=1` and `?aspect=9:16` for clean recordings. `?render=1` exposes
+  `window.otrvRender` for frame-exact offline rendering (see the comment block in `index.html`).
 
 ## Requirements
 

@@ -178,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--port", type=int, default=8770, help="local port (the next free one is used if taken)")
     a.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    a.add_argument("--max-upload-gb", type=float, default=8, help="size limit per uploaded clip file (GB)")
     return ap
 
 
@@ -308,7 +309,13 @@ def cmd_studio(args) -> None:
         from .studio import server
     except ImportError as e:
         raise SystemExit(f"otrv studio needs its extra ({e.name} is missing): run `uv sync --extra studio`") from e
-    server.serve(args.data, args.port, open_browser=not args.no_browser, work=str(WORK))
+    server.serve(
+        args.data,
+        args.port,
+        open_browser=not args.no_browser,
+        work=str(WORK),
+        max_upload=int(args.max_upload_gb * 1e9),
+    )
 
 
 def cmd_setup_brush(args) -> None:

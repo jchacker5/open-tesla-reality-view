@@ -32,9 +32,10 @@ def test_studio_serves(monkeypatch):
 
     seen = {}
 
-    def fake_serve(data, port, open_browser, work):
-        seen.update(data=data, port=port, open_browser=open_browser, work=work)
+    def fake_serve(data, port, open_browser, work, max_upload):
+        seen.update(data=data, port=port, open_browser=open_browser, work=work, max_upload=max_upload)
 
     monkeypatch.setattr(server, "serve", fake_serve)
-    cli.main(["--data", "/footage", "studio", "--no-browser", "--port", "8800"])
-    assert seen == {"data": "/footage", "port": 8800, "open_browser": False, "work": "work"}
+    cli.main(["--data", "/footage", "studio", "--no-browser", "--port", "8800", "--max-upload-gb", "0.5"])
+    assert seen == {"data": "/footage", "port": 8800, "open_browser": False, "work": "work", "max_upload": 500_000_000}
+    assert cli.build_parser().parse_args(["studio"]).max_upload_gb == 8

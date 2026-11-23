@@ -228,6 +228,92 @@ def test_add_source_validation(client, tmp_path):
     assert r.status_code == 400 and "no TeslaCam clips" in r.json()["detail"]
 
 
+@pytest.mark.parametrize("dur", ["1e308", "99999", "0.0001"])
+def test_estimate_clamps_dur(client, dur):
+    r = client.get(f"/api/estimate?dur={dur}", headers=AUTH)
+    assert r.status_code == 200, r.text
+    est = r.json()
+    assert 0 < est["images"] <= 60 * 10 * 9 and est["total"] > 0
+
+
+@pytest.mark.parametrize(
+    "query", ["dur=nan", "dur=inf", "dur=1e400", "dur=-1", "dur=0", "fps=0", "cams=0", "cams=99", "dur=x"]
+)
+def test_estimate_rejects_invalid(client, query):
+    assert client.get(f"/api/estimate?{query}", headers=AUTH).status_code == 422
+
+
+CLIP = "2026-01-02_03-04-05-front.mp4"
+
+
+def uploads_left(lib):
+    return sorted(p.name for p in lib.uploads.rglob("*") if p.is_file()) if lib.uploads.exists() else []
+
+
+def test_upload_writes_the_clip(tmp_path):
+    app, cfg, lib = make_app(tmp_path)
+    c = TestClient(app, base_url=BASE)
+    r = c.put(f"/api/uploads/RecentClips/{CLIP}", content=b"x" * 1000, headers=AUTH)
+    assert r.status_code == 200 and r.json()["bytes"] == 1000
+    assert uploads_left(lib) == [CLIP]
+
+
+def test_upload_size_limit(tmp_path):
+    cfg = server.Config(tmp_path / "data", tmp_path / "work", PORT, token=TOKEN, cwd=tmp_path, max_upload=100)
+    lib = footage.Library(cfg.data, autodetect_fn=lambda: [])
+    c = TestClient(server.create_app(cfg, library=lib), base_url=BASE)
+    r = c.put(f"/api/uploads/RecentClips/{CLIP}", content=b"x" * 101, headers=AUTH)  # Content-Length says so
+    assert r.status_code == 413 and "limit" in r.json()["detail"]
+
+    def chunks():  # no Content-Length (chunked): the limit is enforced while streaming
+        for _ in range(5):
+            yield b"x" * 40
+
+    r = c.put(f"/api/uploads/RecentClips/{CLIP}", content=chunks(), headers=AUTH)
+    assert r.status_code == 413
+    assert uploads_left(lib) == []  # no .part left behind
+    assert c.put(f"/api/uploads/RecentClips/{CLIP}", content=b"x" * 100, headers=AUTH).status_code == 200
+
+
+def test_upload_client_disconnect_removes_the_part_file(tmp_path):
+    """The browser goes away mid-upload: no half-written .part (or clip) is left in uploads/."""
+    import asyncio
+
+    app, cfg, lib = make_app(tmp_path)
+    messages = [
+        {"type": "http.request", "body": b"x" * 100, "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    sent = []
+
+    async def receive():
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "PUT",
+        "scheme": "http",
+        "path": f"/api/uploads/RecentClips/{CLIP}",
+        "raw_path": f"/api/uploads/RecentClips/{CLIP}".encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", f"127.0.0.1:{PORT}".encode()), (b"x-otrv-token", TOKEN.encode())],
+        "client": ("127.0.0.1", 5555),
+        "server": ("127.0.0.1", PORT),
+    }
+    try:
+        asyncio.run(app(scope, receive, send))
+    except Exception:
+        pass  # starlette.requests.ClientDisconnect, depending on the version
+    assert uploads_left(lib) == []
+    assert not any(m.get("status") == 200 for m in sent)
+
+
 def test_upload_rejects_non_clips(client):
     r = client.put("/api/uploads/RecentClips/notes.txt", content=b"x", headers=AUTH)
     assert r.status_code == 400

@@ -56,6 +56,9 @@ CITY_CSP = (
 )
 
 
+MAX_UPLOAD = 8 * 10**9  # bytes per uploaded file; a TeslaCam clip is ~30-80 MB, so this is only a backstop
+
+
 class Config:
     def __init__(
         self,
@@ -65,11 +68,13 @@ class Config:
         token: str | None = None,
         cwd: Path | None = None,
         city_port: int | None = None,
+        max_upload: int = MAX_UPLOAD,
     ):
         self.data = Path(data).expanduser().resolve()
         self.work = Path(work)
         self.port = port
         self.city_port = city_port or port + 1
+        self.max_upload = max_upload  # bytes per uploaded clip file
         self.token = token or secrets.token_urlsafe(24)
         self.cwd = cwd or Path.cwd()
         # set when the process is asked to stop (SIGINT/SIGTERM/SIGHUP): long-lived responses (SSE) end
@@ -276,13 +281,29 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
         kind = next((k for k in ingest.KINDS if k in parts), "Uploads")
         folder = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in (parts[-2] if len(parts) > 1 else kind))
         dest_dir = lib.uploads / kind if folder in (kind, "TeslaCam") else lib.uploads / kind / folder
+        limit = cfg.max_upload
+        too_big = f"upload larger than the {limit / 1e9:g} GB limit (otrv studio --max-upload-gb)"
+        try:
+            declared = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            raise HTTPException(400, "bad Content-Length") from None
+        if declared > limit:
+            raise HTTPException(413, too_big)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / parts[-1]
-        tmp = dest.with_suffix(".part")
-        with open(tmp, "wb") as f:
-            async for chunk in request.stream():
-                f.write(chunk)
-        tmp.replace(dest)
+        tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(4)}.part")  # unique: parallel uploads can't collide
+        size = 0
+        try:
+            with open(tmp, "wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:  # Content-Length can be absent (chunked) or wrong
+                        raise HTTPException(413, too_big)
+                    f.write(chunk)
+            tmp.replace(dest)
+        except BaseException:  # too big, client gone (ClientDisconnect), disk full, server stopping
+            tmp.unlink(missing_ok=True)
+            raise
         return {"path": str(dest), "bytes": dest.stat().st_size}
 
     # ---- drives & clips ----
@@ -335,7 +356,14 @@ def create_app(cfg: Config, library: footage.Library | None = None, runner: Runn
     # ---- estimates & jobs ----
 
     @app.get("/api/estimate")
-    def get_estimate(cams: int = 4, dur: float = 20, fps: float = 3, steps: int = 15000):
+    def get_estimate(
+        cams: int = Query(4, ge=1, le=9),
+        dur: float = Query(20, gt=0, allow_inf_nan=False),
+        fps: float = Query(3, gt=0, allow_inf_nan=False),
+        steps: int = Query(15000, ge=1),
+    ):
+        # clamp to what a build accepts (JobIn), so absurd values (dur=1e308) can't overflow the maths
+        dur, fps, steps = min(max(dur, 1.0), 60.0), min(max(fps, 0.5), 10.0), min(max(steps, 100), 100000)
         rates = progress.history_rates(cfg.work)
         n = max(1, round(dur * fps)) * cams
         per = progress.estimate_build(rates, n, steps)
@@ -648,10 +676,12 @@ def run_servers(cfg: Config, apps: list[tuple[object, int]], runner: Runner) -> 
                 signal.signal(sig, handler)
 
 
-def serve(data: str, port: int = 8770, open_browser: bool = True, work: str = "work") -> None:
+def serve(
+    data: str, port: int = 8770, open_browser: bool = True, work: str = "work", max_upload: int = MAX_UPLOAD
+) -> None:
     port = free_port(port)
     city_port = free_port(port + 1)
-    cfg = Config(Path(data), Path(work).resolve(), port, city_port=city_port)
+    cfg = Config(Path(data), Path(work).resolve(), port, city_port=city_port, max_upload=max_upload)
     app = create_app(cfg)
     url = f"http://127.0.0.1:{port}/?token={cfg.token}"
     print(f"otrv studio: {url}")

@@ -126,7 +126,8 @@ GET  /cities/{name}/     the viewer, serving work/<name>/viewer/ (byte ranges; G
 
 The studio keeps its own state in `<data>/studio/`: `sources.json`, `cache.json` (per-clip length,
 speed and route, keyed by path + size + mtime, so a rescan reads only new clips) and `thumbs/`.
-Uploads go to `<data>/uploads/`.
+Uploads go to `<data>/uploads/`, one clip file per request, up to 8 GB each (`otrv studio --max-upload-gb`);
+a failed or oversized upload leaves no partial file behind.
 
 ## Trying it without a car
 

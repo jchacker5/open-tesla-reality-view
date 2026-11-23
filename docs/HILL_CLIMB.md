@@ -11,7 +11,7 @@ The method is borrowed from
 ## The loop
 
 ```sh
-uv run otrv recon drive1 --eval            # holds out every 8th view for PSNR
+uv run otrv recon drive1 --eval            # holds out every camera at fixed times for PSNR
 uv run otrv bench drive1 --note "baseline"
 # change ONE lever, re-run, bench with a note describing the lever
 uv run otrv bench drive1 --note "fps 3 -> 4"
@@ -31,6 +31,16 @@ uv run otrv bench drive1 --note "fps 3 -> 4"
 
 Held-out PSNR/LPIPS come from Brush's eval renders, made before the post-train clean-up, so the
 clean-up levers (`--prune`, `--dehaze`, `otrv clean`) show up in floaters and haze, not PSNR.
+
+**Held-out views are chosen by time, not by count** (`tsplat/holdout.py`): every camera's frame
+nearest 1.33 s, 4.00 s, 6.67 s, ... (every 8/3 s; "every 8th frame at 3 fps") is held out, and frames
+within 1/3 s of a held-out frame are dropped from training. So `--fps 3` and `--fps 6` are scored on
+the same moments, with the nearest training view 1/3 s away in both. `--dense-init` never sees those
+views. Brush has no eval list option, so recon pads `images.txt` with placeholder entries until
+Brush's `--eval-split-every 8` lands on exactly those views; `work/<name>/eval.json` lists them, and
+bench refuses (records an error) if Brush rendered any other set. Ground truth is `dense_base/`, the
+undistorted images before any lever edited them, and the card also shows a colour-corrected PSNR
+(per-image affine colour fit), which separates geometry from exposure and white balance.
 
 Every bench appends a line, even for a broken run (say SfM failed and there is no `dense/`): each
 metric that couldn't be computed is recorded under `errors` and counts as a gate failure.

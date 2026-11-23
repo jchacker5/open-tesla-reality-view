@@ -99,6 +99,27 @@ def test_dense_init_backprojects_onto_the_scene_and_adds_a_ribbon(tmp_path):
     assert np.abs(rgb[:, 1] - 200).max() < 8  # coloured from the images
 
 
+def test_dense_init_never_uses_held_out_views(tmp_path):
+    """recon --eval's held-out (and guard) views neither get back-projected nor colour the ribbon."""
+    work, dense = make_dense(tmp_path)
+    for i in (0, 1):  # paint the held-out views red, so any colour taken from them shows
+        img = np.zeros((H, W, 3), np.uint8)
+        img[..., 0] = 255
+        img[0, 0, 0] = i
+        Image.fromarray(img).save(dense / "images" / f"front/front_{i:05d}.jpg", format="PNG")
+    seen = []
+
+    def depth(img):
+        seen.append(int(np.asarray(img)[0, 0, 0]))
+        return fake_depth(img)
+
+    counts = densify.run(work, dense, depth_fn=depth, exclude={"front_00000", "front_00001"})
+    assert sorted(seen) == [2, 3, 4] and counts["excluded_views"] == 2
+    lines = (dense / "sparse" / "points3D.txt").read_text().splitlines()[-counts["added"] :]
+    rgb = np.array([[int(v) for v in ln.split()[4:7]] for ln in lines])
+    assert counts["ribbon"] > 0 and rgb[:, 0].max() < 50  # nothing red: no colour from views 0 and 1
+
+
 def test_dense_init_skips_masked_and_sky_pixels(tmp_path):
     work, dense = make_dense(tmp_path)
     (dense / "images" / "masks").mkdir()

@@ -264,13 +264,23 @@ def append_points(points_txt: Path, xyz: np.ndarray, rgb: np.ndarray) -> int:
     return len(new)
 
 
-def run(work: Path, dense: Path, depth_fn=None, max_points: int = MAX_POINTS, seed: int = 0) -> dict:
-    """Add dense depth points and the road ribbon to dense/sparse/points3D.txt. Returns counts."""
+def run(
+    work: Path,
+    dense: Path,
+    depth_fn=None,
+    max_points: int = MAX_POINTS,
+    seed: int = 0,
+    exclude: set[str] = frozenset(),
+) -> dict:
+    """Add dense depth points and the road ribbon to dense/sparse/points3D.txt. Returns counts.
+    Views whose stem is in `exclude` (held-out and guard views of `recon --eval`) are neither
+    back-projected nor used to colour the ribbon, so nothing from them reaches training."""
     sparse = dense / "sparse"
     cams, views, pts = read_model(sparse)
+    used = [v for v in views if Path(v.name).stem not in exclude]
     ego = EgoPath.load(work / "viewer" / "path.json")
     depth_fn = depth_fn or DepthModel()
-    xyz, rgb = backproject(dense, cams, views, pts, depth_fn, MAX_DEPTH_M / ego.mpu)
+    xyz, rgb = backproject(dense, cams, used, pts, depth_fn, MAX_DEPTH_M / ego.mpu)
     raw = len(xyz)
     if raw:
         lateral, _, _ = ego.nearest_road(xyz)
@@ -279,8 +289,15 @@ def run(work: Path, dense: Path, depth_fn=None, max_points: int = MAX_POINTS, se
     if len(xyz) > max_points:
         keep = np.random.default_rng(seed).choice(len(xyz), max_points, replace=False)
         xyz, rgb = xyz[keep], rgb[keep]
-    rx, rc = road_ribbon(dense, cams, views, ego)
+    rx, rc = road_ribbon(dense, cams, used, ego)
     added = append_points(sparse / "points3D.txt", np.concatenate([xyz, rx]), np.concatenate([rgb, rc]))
-    counts = {"sfm": len(pts), "depth_raw": raw, "depth": len(xyz), "ribbon": len(rx), "added": added}
+    counts = {
+        "sfm": len(pts),
+        "depth_raw": raw,
+        "depth": len(xyz),
+        "ribbon": len(rx),
+        "added": added,
+        "excluded_views": len(views) - len(used),
+    }
     print(f"dense init: +{len(xyz)} depth points (from {raw}), +{len(rx)} road-ribbon points (SfM had {len(pts)})")
     return counts

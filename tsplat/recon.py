@@ -394,7 +394,7 @@ def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float =
     """Package posed reference frames + the chase-camera trajectory for a novel-view-synthesis model
     (e.g. ViewNeXt once its weights are public). Generic format: OpenCV camera convention
     (x right, y down, z forward), 4x4 camera-to-world matrices, pinhole intrinsics in pixels."""
-    dense = work / "dense"
+    dense = work / "dense_base" if (work / "dense_base" / "sparse").is_dir() else work / "dense"  # no placeholders
     path = json.loads((work / "viewer" / "path.json").read_text())
     up = np.array(path["up"])
     u = 1.0 / path["metresPerUnit"]

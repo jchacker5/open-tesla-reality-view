@@ -19,15 +19,18 @@ def stubbed(tmp_path, monkeypatch):
     monkeypatch.setenv("OTRV_SKIP_DOCTOR", "1")
     work = tmp_path / "work" / "r"
     work.mkdir(parents=True)
-    (work / "meta.json").write_text(json.dumps({"fps": 6, "cams": ["front"]}))
+    (work / "meta.json").write_text(json.dumps({"fps": 6, "dur": 4, "cams": ["front"]}))
     calls: dict = {}
     dense = work / "dense"
+    (dense / "sparse").mkdir(parents=True)
+    poses = "".join(f"{i + 1} 1 0 0 0 0 0 {i} 1 front/front_{i:05d}.jpg\n\n" for i in range(24))
+    (dense / "sparse" / "images.txt").write_text("# images\n" + poses)
     monkeypatch.setattr(cli.recon, "sfm", lambda *a: work / "sparse" / "0")
     monkeypatch.setattr(cli.recon, "undistort", lambda *a: dense)
     monkeypatch.setattr(cli.recon, "snapshot_dense", lambda *a: None)
     monkeypatch.setattr(cli.recon, "export_path", lambda *a: None)
     monkeypatch.setattr(cli.colornorm, "run", lambda *a: calls.setdefault("color_norm", True))
-    monkeypatch.setattr(cli.densify, "run", lambda *a: calls.setdefault("dense_init", True))
+    monkeypatch.setattr(cli.densify, "run", lambda *a, exclude: calls.setdefault("dense_init", exclude))
     monkeypatch.setattr(cli.sky, "apply", lambda d, mode: calls.setdefault("sky", mode))
     monkeypatch.setattr(cli.importlib.util, "find_spec", lambda name: object())
 
@@ -62,6 +65,11 @@ def test_every_recon_flag_is_recorded_in_recon_args(stubbed):
     assert rec["color_norm"] is True and rec["dense_init"] is True and "clean" in rec
     assert calls["color_norm"] and calls["dense_init"] and calls["sky"] == "alpha"
     assert calls["train"]["eval_every"] == 8 and calls["collision"]  # baked after training
+    # held out at 4/3 s (frame 8 at 6 fps; 4 s is past the 24 frames), guard frames 7 and 9: none of
+    # them may seed the splat, and Brush's split must land on frame 8 only
+    assert calls["dense_init"] == {"front_00007", "front_00008", "front_00009"}
+    split = json.loads((work / "eval.json").read_text())
+    assert split["eval"] == ["front_00008"] and split["guard"] == ["front_00007", "front_00009"]
 
 
 def test_recon_args_reach_brush(stubbed):

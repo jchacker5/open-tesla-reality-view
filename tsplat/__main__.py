@@ -28,7 +28,22 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, clean, collision, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
+from . import (
+    bench,
+    brush,
+    clean,
+    collision,
+    colornorm,
+    densify,
+    doctor,
+    holdout,
+    ingest,
+    prep,
+    recon,
+    serve,
+    sky,
+    speed,
+)
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -262,7 +277,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--live", action="store_true", help="open Brush's live training viewer window")
     a.add_argument("--skip-sfm", action="store_true", help="reuse work/<name>/dense from the last recon; retrain only")
     a.add_argument(
-        "--eval", action="store_true", help="hold out every 8th view (not trained on) so `otrv bench` can report PSNR"
+        "--eval",
+        action="store_true",
+        help="hold out every camera at fixed times (every 8/3 s; frames within 1/3 s of them aren't trained on "
+        "either) so `otrv bench` can score novel views the same way at any --fps",
     )
     a.add_argument("--seed", type=int, default=42, help="Brush random seed (fixed, so A/B runs differ by the lever)")
     a.add_argument(
@@ -416,6 +434,7 @@ def cmd_recon(args) -> None:
     if args.dense_init and importlib.util.find_spec("transformers") is None:  # fail before SfM, not after
         raise SystemExit("--dense-init needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
     (work / "recon_args.json").unlink(missing_ok=True)  # written only when this run finishes
+    (work / "eval.json").unlink(missing_ok=True)
     dense = work / "dense"
     timings_path = work / "timings.json"
     timings = json.loads(timings_path.read_text()) if args.skip_sfm and timings_path.exists() else {}
@@ -431,13 +450,16 @@ def cmd_recon(args) -> None:
     else:
         dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
+    meta = json.loads((work / "meta.json").read_text())
+    names = [line.split()[9] for line in recon._image_lines(dense)[::2] if len(line.split()) >= 10]
+    split = holdout.plan(names, meta["fps"], meta["dur"]) if args.eval else holdout.Split()
     if args.color_norm:  # before dense init, so the init points get the normalised colours
         t0 = time.perf_counter()
         colornorm.run(dense, json.loads((work / "meta.json").read_text())["fps"])
         timings["color_norm"] = time.perf_counter() - t0
     if args.dense_init:
         t0 = time.perf_counter()
-        densify.run(work, dense)
+        densify.run(work, dense, exclude=split.held)  # held-out views must not seed the splat
         timings["dense_init"] = time.perf_counter() - t0
     sky.apply(dense, args.sky)  # last: it can turn images into RGBA .png and rename them
     t0 = time.perf_counter()
@@ -453,7 +475,9 @@ def cmd_recon(args) -> None:
     lpips = lpips_weight(args.lpips_loss_weight, brush.version(brush.path()))
     brush_args += ["--lpips-loss-weight", f"{lpips:g}"]
     rules = clean_rules(args, args.sky)
-    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, brush_args, rules)
+    if args.eval:
+        holdout.apply(work, dense, split)
+    recon.train(work, dense, args.steps, args.live, holdout.BRUSH_SPLIT if args.eval else 0, brush_args, rules)
     timings["train"] = time.perf_counter() - t0
     t0 = time.perf_counter()
     collision.run(work)
@@ -466,6 +490,7 @@ def cmd_recon(args) -> None:
                 "global_mapper": args.global_mapper,
                 "rig": not args.no_rig,
                 "eval": args.eval,
+                "eval_split": "time" if args.eval else None,
                 "seed": args.seed,
                 "opac_loss_weight": args.opac_loss_weight,
                 "scale_loss_weight": args.scale_loss_weight,

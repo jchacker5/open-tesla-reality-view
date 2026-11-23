@@ -54,7 +54,7 @@ def registration(work: Path) -> dict[str, dict]:
     out of the frames prep extracted. Raises if the model registers more images than exist, which means
     dense/ is from a different prep than images/."""
     meta = json.loads((work / "meta.json").read_text())
-    names = set(_image_names(work / "dense"))
+    names = set(_image_names(gt_root(work)))  # dense/ may hold recon --eval's placeholders
     out = {}
     for cam in meta["cams"]:
         frames = {p.name for p in (work / "images" / cam).glob("*.jpg")}
@@ -222,6 +222,15 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
         rows.setdefault(cam, []).append(r)
     if not rows:
         raise FileNotFoundError(f"no eval render in {evals} matches an image in {dense / 'images'}")
+    split = json.loads((work / "eval.json").read_text()) if (work / "eval.json").exists() else None
+    if split is not None:  # Brush must have held out exactly the views recon chose
+        rendered = {r.stem for r in evals.glob("*.png")}
+        extra, missing = rendered - set(split["eval"]), set(split["eval"]) - rendered
+        if extra or missing:
+            raise ValueError(
+                f"Brush's eval views differ from eval.json: {len(extra)} unexpected "
+                f"({', '.join(sorted(extra)[:3])}), {len(missing)} missing ({', '.join(sorted(missing)[:3])})"
+            )
 
     def agg(key: str, nd: int) -> tuple[float | None, dict]:
         per = {c: _round(_mean([r.get(key) for r in rs]), nd) for c, rs in sorted(rows.items())}
@@ -238,6 +247,8 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
             "views": views,
             "sky_excluded": sky_excluded,
             "gt": dense.name,
+            "split": "time" if split else "every 8th image",
+            "guard": len(split["guard"]) if split else 0,
         },
         "psnr_cc": dict(zip(("overall", "per_cam"), agg("psnr_cc", 2), strict=True)),
         "lpips": None,

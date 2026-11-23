@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import binary_closing, binary_opening, median_filter
 
-from . import sei, sky
+from . import holdout, sei, sky
 from .ingest import CAMS
 
 # Which cameras can see the same scene (spatially, allowing for car motion over time).
@@ -473,6 +473,7 @@ def run(
                 "width": width,
                 "sky_model": sky_model,
                 "mask_movers": movers,
+                "eval_times": holdout.eval_times(actual_dur),
             },
             indent=1,
         )

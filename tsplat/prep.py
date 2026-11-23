@@ -382,6 +382,7 @@ STALE_FILES = (
     "recon_args.json",
     "timings.json",
     "metrics.json",
+    "prune.json",
     "meta.json",
     "pairs.txt",
     "rig_config.json",

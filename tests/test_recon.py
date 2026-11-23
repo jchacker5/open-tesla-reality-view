@@ -151,6 +151,24 @@ def test_train_fresh_splat_dir_and_final_export(fake_brush):
     assert names == ["eval_8000", "splat_2000.ply", "splat_4000.ply", "splat_6000.ply", "splat_8000.ply"]
 
 
+def test_prune_scene_writes_scene_and_counts(tmp_path):
+    from splatfix import make_ply, write_path
+
+    from tsplat import splats
+
+    work = tmp_path / "w"
+    write_path(work / "viewer" / "path.json", mpu=0.5)
+    src = work / "splat" / "splat_100.ply"
+    pts = [[0, -2.0, 4], [0, -2.0, 5], [12, -2, 5], [12, -20, 5]]  # 2 in the tube (1 m up), 2 well clear
+    splats.write_ply(src, make_ply(pts, opacity=[0.9, 0.9, 0.9, 0.05], scale_m=[0.1, 0.1, 0.1, 5.0], mpu=0.5))
+    counts = recon.prune_scene(work, src, work / "viewer" / "scene.ply")
+    assert counts == {"before": 4, "tube": 2, "giant": 1, "after": 1}
+    assert json.loads((work / "prune.json").read_text()) == counts
+    scene = splats.read_ply(work / "viewer" / "scene.ply")
+    assert len(scene) == 1 and scene.xyz()[0, 0] == 12
+    assert len(splats.read_ply(src)) == 4  # the trained splat is left alone
+
+
 def test_export_interval_always_hits_final_step():
     for steps in (1000, 2500, 7000, 15000, 30000, 30001):
         assert steps % recon.export_every(steps) == 0

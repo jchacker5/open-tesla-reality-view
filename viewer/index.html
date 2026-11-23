@@ -57,8 +57,11 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; letter-spacing: .08em; padding: 0 14px; }
   button.primary:hover { filter: brightness(1.12); }
   button.primary.on, button.primary[aria-pressed="true"] { background: #fff; color: #0b0d10; border-color: #fff; }
-  .minimap { position: absolute; right: 18px; bottom: 92px; width: 150px; height: 150px; border-radius: 50%; pointer-events: none;
+  .minimap { position: absolute; right: 18px; bottom: 104px; width: 150px; height: 150px; border-radius: 50%; pointer-events: none;
     background: rgba(10,12,15,.72); box-shadow: 0 0 0 1px var(--line), 0 6px 24px rgba(0,0,0,.4); z-index: 2; }
+  .mapAttr { position: absolute; right: 18px; bottom: 76px; max-width: 220px; text-align: right; font: 9px/1.3 var(--mono); color: var(--dim);
+    opacity: .8; pointer-events: none; z-index: 2; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+  button.rec { border-color: #ff3b5c; color: #ff3b5c; }
   .edge { position: absolute; inset: 0; pointer-events: none; z-index: 1;
     background: repeating-linear-gradient(45deg, rgba(245,165,36,.28) 0 10px, transparent 10px 22px);
     -webkit-mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); mask: radial-gradient(130% 120% at 50% 50%, transparent 62%, #000 82%); }
@@ -73,7 +76,9 @@
   /* flags */
   .app.clean, .app.noui { grid-template-columns: 1fr; }
   .app.clean .side, .app.clean .meta { display: none; }
-  .app.noui .side, .app.noui .hud, .app.noui .meta, .app.noui .bar, .app.noui .toast { display: none; }
+  .app.noui .side, .app.noui .hud, .app.noui .meta, .app.noui .bar, .app.noui .toast, .app.noui .credit { display: none; }
+  .credit { position: absolute; left: 12px; bottom: 10px; max-width: max(200px, calc((100% - 770px) / 2)); font: 10px/1.35 var(--mono); color: var(--text);
+    opacity: .6; pointer-events: none; z-index: 2; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
   .app.noui { padding: 0; }
   .app.noui .view { border-radius: 0; }
   .app.render .vignette, .app.render .loading { display: none; }
@@ -156,11 +161,13 @@
         </div>
         <div class="toast" id="toast" role="status" hidden></div>
         <div class="edge" id="edge" hidden><span>edge of the reconstruction</span></div>
-        <canvas class="minimap" id="minimap" width="300" height="300" hidden aria-label="Minimap"></canvas>
+        <canvas class="minimap" id="minimap" width="300" height="300" hidden role="img" aria-label="Minimap: heading-up map around the car"></canvas>
+        <div class="mapAttr" id="mapAttr" hidden></div>
         <div class="tDrive" id="tDrive" hidden>
           <div class="tStick" id="tStick" aria-label="Steering"><div class="tKnob" id="tKnob"></div></div>
           <div class="tBtns"><button id="tHb" aria-label="Handbrake">HB</button><button id="tBrake" aria-label="Brake / reverse">BRK</button><button id="tGas" aria-label="Accelerate">GAS</button></div>
         </div>
+        <div class="credit" id="credit" hidden></div>
         <div class="meta" id="meta"><div class="date" id="date"></div><div id="metaSub"></div></div>
       </div>
     </div>
@@ -178,8 +185,10 @@
         <button id="mChase" class="on" title="Chase camera">chase</button>
         <button id="mDriver" title="Driver view">driver</button>
         <button id="mFree" title="Free orbit">free</button>
+        <button id="mDrone" title="Drone: high behind the car, over the street map (5)">drone</button>
         <button id="mDrive" class="primary" title="Drive the car yourself (4 / gamepad Start)">DRIVE</button>
         <button id="share" title="Copy a link to this moment">link</button>
+        <button id="record" title="Record the 3D view to a .webm file">rec</button>
         <button id="mute" title="Mute (M)" aria-pressed="false">🔇</button>
       </div>
     </div>
@@ -231,7 +240,7 @@ const halt = () => new Promise(() => {}); // stop module evaluation quietly afte
 let resolveReady, rejectReady;
 const renderReady = new Promise((a, b) => { resolveReady = a; rejectReady = b; });
 renderReady.catch(() => {});
-window.otrvRender = { ready: renderReady, duration: NaN, frame: async () => { throw new Error("otrvRender: not ready yet, await otrvRender.ready"); } };
+window.otrvRender = { ready: renderReady, duration: NaN, credit: "", frame: async () => { throw new Error("otrvRender: not ready yet, await otrvRender.ready"); } };
 function showError(title, html) {
   rejectReady(new Error(title));
   $("loading").hidden = true;
@@ -355,6 +364,41 @@ let carApi = buildCar(THREE);
 const car = new THREE.Group();
 let carBody = carApi.body;
 car.add(carApi.group);
+// User car model: models/car.json -> { file: "car.glb" | "car/<name>.gltf", lengthM, paint, credit,
+// source: { axes } } (installed by `otrv car fetch`; `otrv view` copies ~/.otrv/models here). Loaded
+// with GLTFLoader (meshopt, Draco and KTX2 decoders from the same three release). Any failure keeps
+// the built-in car. The car stays hidden until this settles, so the built-in one never pops.
+let carCredit = "";
+const carLoaded = (async () => {
+  try {
+    const r = await fetch("models/car.json");
+    if (!r.ok) return false;
+    const cfg = await r.json();
+    const parts = String(cfg.file ?? "").split("/");
+    if (!cfg.file || parts.some((p) => !p || p === "." || p === "..")) throw new Error(`bad "file" in models/car.json: ${cfg.file}`);
+    const [{ GLTFLoader }, { MeshoptDecoder }, { DRACOLoader }, { KTX2Loader }] = await Promise.all([
+      import("three/addons/loaders/GLTFLoader.js"), import("three/addons/libs/meshopt_decoder.module.js"),
+      import("three/addons/loaders/DRACOLoader.js"), import("three/addons/loaders/KTX2Loader.js")]);
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder)
+      .setDRACOLoader(new DRACOLoader().setDecoderPath("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/draco/gltf/"))
+      .setKTX2Loader(new KTX2Loader().setTranscoderPath("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/basis/").detectSupport(renderer));
+    const gltf = await loader.loadAsync("models/" + parts.map(encodeURIComponent).join("/"));
+    const api = fitModelCar(THREE, gltf.scene, cfg);
+    car.remove(carApi.group);
+    carApi = api; carBody = api.body;
+    car.add(api.group);
+    CAR.wheelR = api.dims.wheelR;
+    carCredit = String(cfg.credit ?? "");
+    window.otrvRender.credit = carCredit;
+    if (carCredit) { $("credit").textContent = carCredit; $("credit").hidden = false; }
+    return true;
+  } catch (e) {
+    console.warn("models/car.json: couldn't load the car model, using the built-in car.", e);
+    return false;
+  }
+})();
+let carSettled = false;
+carLoaded.then(() => (carSettled = true));
 // lamp state from telemetry (or drive mode): brake brightens the tail lamps, blinkers flash amber at
 // ~1.5 Hz from the given clock (deterministic for the render mode), front wheels steer.
 function setCarSignals({ brake = false, blinkL = false, blinkR = false, steer = 0, t = 0, spin = null }) {
@@ -500,6 +544,8 @@ function updateRibbon(t) {
 // camera whose target is dragged along with the car.
 const CHASE = { back: 7.2, up: 2.7, ahead: 4.5, aim: 0.6, fov: 45, halfLife: 0.35 };
 const DRIVER = { fov: 60 };
+// Drone: Tesla "Reality View"-style high rear view, 11 m back, 8 m up, aiming 2.5 m ahead at 0.8 m
+const DRONE = { back: 11, up: 8, ahead: 2.5, aim: 0.8, fov: 48 };
 const newPose = () => ({ pos: new THREE.Vector3(), quat: new THREE.Quaternion(), fov: 45 });
 function lookPose(out, eye, target, fov) {
   out.pos.copy(eye);
@@ -570,7 +616,7 @@ function setMode(m) {
   intro = null;
   const prev = mode;
   mode = m;
-  for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"], ["mDrive", "drive"]]) {
+  for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"], ["mDrone", "drone"], ["mDrive", "drive"]]) {
     $(id).classList.toggle("on", n === m);
     $(id).setAttribute("aria-pressed", String(n === m));
   }
@@ -580,6 +626,7 @@ function setMode(m) {
   if (prev === "drive") driveExit();
   if (m === "drive") driveEnter();
   if (m === "free") { const ps = poseAt(clock); placeFree(ps.carPos, ps.f, false); }
+  showMinimap(m === "drive" || m === "drone");
   resetView(false);
 }
 function resetView(recentre = true) {
@@ -589,6 +636,7 @@ function resetView(recentre = true) {
 $("mChase").onclick = () => setMode("chase");
 $("mDriver").onclick = () => setMode("driver");
 $("mFree").onclick = () => setMode("free");
+$("mDrone").onclick = () => setMode("drone");
 $("mDrive").onclick = () => setMode(mode === "drive" ? "chase" : "drive");
 renderer.domElement.style.touchAction = "pan-y"; // OrbitControls forces "none" on construction
 
@@ -629,6 +677,7 @@ renderer.domElement.style.touchAction = "pan-y"; // OrbitControls forces "none" 
 const modePose = newPose(), tmpPose = newPose();
 function computeModePose(ps) {
   if (mode === "chase") return chasePose(modePose, ps.carPos, chaseSpring.f);
+  if (mode === "drone") return chasePose(modePose, ps.carPos, chaseSpring.f, DRONE);
   if (mode === "driver") return driverPose(modePose, ps);
   modePose.pos.copy(orbitCam.position); modePose.quat.copy(orbitCam.quaternion); modePose.fov = 50;
   return modePose;
@@ -695,6 +744,7 @@ addEventListener("keydown", (e) => {
     case "Digit2": setMode("driver"); break;
     case "Digit3": setMode("free"); break;
     case "Digit4": setMode(drv ? "chase" : "drive"); break;
+    case "Digit5": setMode("drone"); break;
     case "KeyU": setUi(!uiOn); break;
     case "KeyF": if (document.fullscreenElement) document.exitFullscreen?.(); else $("stage").requestFullscreen?.().catch(() => {}); break;
     case "KeyM": sound.toggleMute(); break;
@@ -712,6 +762,43 @@ $("share").onclick = async () => {
   try { await navigator.clipboard.writeText(url); toast("Link copied"); } catch { toast("Link is in the address bar"); }
 };
 $("scrub").oninput = (e) => seek((e.target.value / 1000) * DUR);
+// in-browser recording of the 3D view (MediaRecorder on the canvas stream) -> .webm download
+let rec = null;
+function startRecording() {
+  const cv = renderer.domElement;
+  if (!window.MediaRecorder || !cv.captureStream) { toast("Recording isn't supported in this browser"); return; }
+  const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"].find((m) => MediaRecorder.isTypeSupported(m)) ?? "";
+  const stream = cv.captureStream(30);
+  const recorder = new MediaRecorder(stream, { ...(mime && { mimeType: mime }), videoBitsPerSecond: 12_000_000 });
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    if (!chunks.length) return;
+    const blob = new Blob(chunks, { type: mime || "video/webm" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const clip = String(path.clip ?? "replay").replace(/[^\w.-]+/g, "_"), stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.download = `otrv-${clip}-${mode}-${stamp}.${mime.includes("mp4") ? "mp4" : "webm"}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  };
+  recorder.start(1000);
+  rec = { recorder, t0: performance.now() };
+  $("record").classList.add("rec");
+  $("record").setAttribute("aria-pressed", "true");
+  toast("Recording the 3D view · press rec again to stop and save");
+}
+function stopRecording() {
+  if (!rec) return;
+  const r = rec;
+  rec = null;
+  $("record").classList.remove("rec");
+  $("record").setAttribute("aria-pressed", "false");
+  $("record").textContent = "rec";
+  if (r.recorder.state !== "inactive") r.recorder.stop();
+}
+$("record").onclick = () => { try { rec ? stopRecording() : startRecording(); } catch (err) { console.error(err); stopRecording(); toast("Recording failed"); } };
 function setPlaying(on) {
   playing = on && ready;
   $("play").textContent = playing ? "❚❚" : "▶";
@@ -724,8 +811,10 @@ setPlaying(false);
 sceneReady.then(() => {
   if (RENDER) return;
   const cam = HASH.get("cam"), t = parseFloat(HASH.get("t"));
-  if (["chase", "driver", "free"].includes(cam)) { setMode(cam); blend = null; }
+  // #cam=chase|driver|free|drone|drive (Studio's "Drive" button links to #cam=drive)
   if (Number.isFinite(t)) seek(t);
+  if (["chase", "driver", "free", "drone", "drive"].includes(cam)) { setMode(cam); blend = null; }
+  if (cam === "drive") return; // straight into drive mode: no replay autoplay, no intro
   if (!REDUCED_MOTION) setPlaying(true);
   if (!REDUCED_MOTION && Q.get("intro") !== "0" && !HASH.has("t") && !HASH.has("cam")) intro = { t: 0 };
 }, () => {});
@@ -1157,7 +1246,7 @@ addEventListener("gamepadconnected", (e) => {
 addEventListener("gamepaddisconnected", () => { if (![...(navigator.getGamepads?.() ?? [])].some(Boolean)) $("padChip").hidden = true; });
 function cycleCamera() {
   if (mode === "drive") { drive.cam = drive.cam === "chase" ? "hood" : "chase"; startBlend(0.5); return; }
-  setMode({ chase: "driver", driver: "free", free: "chase" }[mode] ?? "chase");
+  setMode({ chase: "drone", drone: "driver", driver: "free", free: "chase" }[mode] ?? "chase");
 }
 // touch controls (shown in drive mode on coarse pointers): left joystick steers, right buttons drive
 {
@@ -1210,12 +1299,10 @@ function driveEnter() {
   driveCamS.ready = false;
   drive.cam = "chase";
   $("tDrive").hidden = !matchMedia("(pointer: coarse)").matches;
-  $("minimap").hidden = false;
   toast(matchMedia("(pointer: coarse)").matches ? "Drive: joystick to steer, GAS / BRK" : "Drive: W/A/S/D or arrows · Shift boost · Space handbrake · H horn · C look back", 3200);
 }
 function driveExit() {
   $("tDrive").hidden = true;
-  $("minimap").hidden = true;
   $("edge").hidden = true;
   carBody.rotation.set(0, 0, 0);
   carBody.position.set(0, 0, 0);
@@ -1240,7 +1327,147 @@ function placeDriveCar() {
   setCarSignals({ brake: drive.brakeLit, steer: drive.delta, t: performance.now() / 1000, spin: drive.spin });
   return fwd;
 }
-// minimap: heading-up, recorded road + drivable corridor, hatched outside it
+// ---- GPS map layer: the clip's GPS track on Esri's keyless dark street tiles ----
+// The track comes from path.json "track" (written by `otrv recon` via tsplat/geo.py:
+// { origin: {lat, lon}, rms_m, fixes, scale, frames: [{t, lat, lon}] }, one entry per path frame) or,
+// for older clips, is aligned here from telemetry.json lat/lon with the same 2D similarity fit
+// (alignSlam below, a port of geo.py). A second fit maps lat/lon onto the drive ground frame, so the
+// tiles can sit under the reconstruction (drone underlay) and under the minimap. Tiles: Esri
+// World_Dark_Gray_Base (no API key, CORS *, max zoom 16); attribution shown whenever the map is.
+const EARTH_M = 6378137;
+const MAP_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}";
+const MAP_ATTR = "Map © Esri, HERE, Garmin, © OpenStreetMap contributors";
+function usableFix(s) {
+  if (!s || s.lat == null || s.lon == null || s.t == null) return false;
+  const lat = +s.lat, lon = +s.lon;
+  return Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(+s.t) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(Math.abs(lat) < 1e-7 && Math.abs(lon) < 1e-7);
+}
+// 2D Umeyama: dst ~= scale * R * src + t (proper rotation). forceScale pins the scale.
+function umeyama2(src, dst, forceScale = null) {
+  const n = src.length, mean = (P) => P.reduce((a, p) => [a[0] + p[0] / n, a[1] + p[1] / n], [0, 0]);
+  const mx = mean(src), my = mean(dst);
+  let sxx = 0, sxy = 0, syx = 0, syy = 0, vx = 0;
+  for (let k = 0; k < n; k++) {
+    const x0 = src[k][0] - mx[0], x1 = src[k][1] - mx[1], y0 = dst[k][0] - my[0], y1 = dst[k][1] - my[1];
+    sxx += y0 * x0; sxy += y0 * x1; syx += y1 * x0; syy += y1 * x1; vx += x0 * x0 + x1 * x1;
+  }
+  // the best proper rotation for a 2x2 cross-covariance has angle atan2(syx - sxy, sxx + syy)
+  const th = Math.atan2(syx - sxy, sxx + syy), c = Math.cos(th), s = Math.sin(th);
+  const scale = forceScale ?? (vx > 1e-12 ? (c * (sxx + syy) + s * (syx - sxy)) / vx : 1);
+  const R = [[c, -s], [s, c]];
+  return { scale, R, t: [my[0] - scale * (c * mx[0] - s * mx[1]), my[1] - scale * (s * mx[0] + c * mx[1])] };
+}
+const applySim = (f, p) => [f.scale * (f.R[0][0] * p[0] + f.R[0][1] * p[1]) + f.t[0], f.scale * (f.R[1][0] * p[0] + f.R[1][1] * p[1]) + f.t[1]];
+// telemetry lat/lon -> per-frame lat/lon (same contract as tsplat/geo.py align_track)
+function alignSlam(pathObj, telemetry) {
+  const fixes = (telemetry || []).filter(usableFix);
+  if (pathObj.frames.length < 2 || fixes.length < 2) return null;
+  const lat0 = +fixes[0].lat, lon0 = +fixes[0].lon, cos0 = Math.cos(THREE.MathUtils.degToRad(lat0));
+  const o = frames[0].p, mpu = pathObj.metresPerUnit;
+  const xy = (P) => { const d = _v.subVectors(P, o).multiplyScalar(mpu); return [-d.dot(GX), d.dot(GZ)]; }; // (right, fwd) metres
+  const enu = (lat, lon) => [THREE.MathUtils.degToRad(lon - lon0) * EARTH_M * cos0, THREE.MathUtils.degToRad(lat - lat0) * EARTH_M];
+  const src = fixes.map((s) => xy(poseAt(+s.t).p)), dst = fixes.map((s) => enu(+s.lat, +s.lon));
+  let span = 0;
+  for (const a of dst) for (const b of dst) span = Math.max(span, Math.hypot(a[0] - b[0], a[1] - b[1]));
+  const fit = umeyama2(src, dst, span < 8 ? 1 : null); // under 8 m of GPS can't support a scale
+  return {
+    origin: { lat: lat0, lon: lon0 }, scale: fit.scale, fixes: fixes.length,
+    frames: frames.map((f) => {
+      const [e, nn] = applySim(fit, xy(f.p));
+      return { t: f.t, lat: lat0 + THREE.MathUtils.radToDeg(nn / EARTH_M), lon: lon0 + THREE.MathUtils.radToDeg(e / (EARTH_M * cos0)) };
+    }),
+  };
+}
+const GEO = (() => {
+  const tr = path.track?.frames?.length >= 2 ? path.track : alignSlam(path, tel);
+  const pts = (tr?.frames ?? []).filter((f) => Number.isFinite(+f.lat) && Number.isFinite(+f.lon) && Number.isFinite(+f.t));
+  if (pts.length < 2) return null;
+  const lat0 = +(tr.origin?.lat ?? pts[0].lat), lon0 = +(tr.origin?.lon ?? pts[0].lon), cos0 = Math.cos(THREE.MathUtils.degToRad(lat0));
+  const enu = (lat, lon) => [THREE.MathUtils.degToRad(lon - lon0) * EARTH_M * cos0, THREE.MathUtils.degToRad(lat - lat0) * EARTH_M];
+  // ENU metres -> drive ground metres (x = left, z = fwd); fitted in (right, fwd) so it's a proper rotation
+  const fit = umeyama2(pts.map((f) => enu(+f.lat, +f.lon)), pts.map((f) => { const g = toGround(poseAt(+f.t).road); return [-g.x, g.z]; }));
+  const toXZ = (lat, lon) => { const [r, z] = applySim(fit, enu(lat, lon)); return { x: -r, z }; };
+  const rms = Math.sqrt(pts.reduce((a, f) => { const g = toGround(poseAt(+f.t).road), q = toXZ(+f.lat, +f.lon); return a + (g.x - q.x) ** 2 + (g.z - q.z) ** 2; }, 0) / pts.length);
+  return { pts, lat0, lon0, toXZ, rms, source: path.track?.frames?.length >= 2 ? "path.json track" : "telemetry GPS" };
+})();
+// Web Mercator tiles around the track (zoom 16, lowered until <= 8x8 tiles), composited into a canvas
+const mapLayer = { canvas: null, ready: false, px2xz: null, underlay: null };
+const merc = (lat, lon, z) => {
+  const n = 2 ** z, la = THREE.MathUtils.degToRad(clamp(lat, -85, 85));
+  return [((lon + 180) / 360) * n * 256, ((1 - Math.log(Math.tan(la) + 1 / Math.cos(la)) / Math.PI) / 2) * n * 256];
+};
+const unmerc = (px, py, z) => {
+  const n = 2 ** z * 256;
+  return { lat: THREE.MathUtils.radToDeg(Math.atan(Math.sinh(Math.PI * (1 - (2 * py) / n)))), lon: (px / n) * 360 - 180 };
+};
+async function buildMapLayer() {
+  if (!GEO || RENDER && Q.get("map") === "0") return;
+  const lats = GEO.pts.map((f) => +f.lat), lons = GEO.pts.map((f) => +f.lon);
+  const pad = 350 / EARTH_M * (180 / Math.PI); // ~350 m around the track
+  const padLon = pad / Math.cos(THREE.MathUtils.degToRad(GEO.lat0));
+  let z = 16, a, b;
+  for (; z > 10; z--) {
+    a = merc(Math.max(...lats) + pad, Math.min(...lons) - padLon, z); b = merc(Math.min(...lats) - pad, Math.max(...lons) + padLon, z);
+    if ((Math.floor(b[0] / 256) - Math.floor(a[0] / 256) + 1) * (Math.floor(b[1] / 256) - Math.floor(a[1] / 256) + 1) <= 64) break;
+  }
+  const tx0 = Math.floor(a[0] / 256), ty0 = Math.floor(a[1] / 256), nx = Math.floor(b[0] / 256) - tx0 + 1, ny = Math.floor(b[1] / 256) - ty0 + 1;
+  const c = document.createElement("canvas");
+  c.width = nx * 256; c.height = ny * 256;
+  const g = c.getContext("2d");
+  g.fillStyle = "#1a1c1f"; g.fillRect(0, 0, c.width, c.height);
+  let ok = 0;
+  await Promise.all([...Array(nx * ny).keys()].map((k) => new Promise((done) => {
+    const i = k % nx, j = Math.floor(k / nx), img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => { g.drawImage(img, i * 256, j * 256); ok++; done(); };
+    img.onerror = () => done();
+    img.src = MAP_TILES.replace("{z}", z).replace("{x}", tx0 + i).replace("{y}", ty0 + j);
+  })));
+  if (!ok) { console.warn("map tiles unavailable (offline?)"); return; }
+  // canvas pixel -> ground metres (affine from three corners; Mercator is linear enough at this size)
+  const P = (px, py) => { const ll = unmerc(tx0 * 256 + px, ty0 * 256 + py, z); return GEO.toXZ(ll.lat, ll.lon); };
+  const o = P(0, 0), ex = P(c.width, 0), ey = P(0, c.height);
+  const A = { a: (ex.x - o.x) / c.width, b: (ey.x - o.x) / c.height, c: o.x, d: (ex.z - o.z) / c.width, e: (ey.z - o.z) / c.height, f: o.z };
+  Object.assign(mapLayer, { canvas: c, px2xz: A, zoom: z, ready: true });
+  // drone underlay: a road-following grid of the tiles, faded at the edges, under the splats
+  const u = document.createElement("canvas");
+  u.width = c.width; u.height = c.height;
+  const ug = u.getContext("2d");
+  ug.drawImage(c, 0, 0);
+  ug.globalCompositeOperation = "destination-in";
+  const grd = ug.createRadialGradient(u.width / 2, u.height / 2, Math.min(u.width, u.height) * 0.3, u.width / 2, u.height / 2, Math.min(u.width, u.height) * 0.5);
+  grd.addColorStop(0, "rgba(0,0,0,1)"); grd.addColorStop(1, "rgba(0,0,0,0)");
+  ug.fillStyle = grd; ug.fillRect(0, 0, u.width, u.height);
+  const tex = new THREE.CanvasTexture(u);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  const N = 48, geo = new THREE.PlaneGeometry(1, 1, N, N), pos = geo.attributes.position, uv = geo.attributes.uv, Pv = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    const px = uv.getX(i) * c.width, py = (1 - uv.getY(i)) * c.height;
+    const x = A.a * px + A.b * py + A.c, zz = A.d * px + A.e * py + A.f;
+    fromGround(x, zz, pathQuery(x, zz).h - 0.35 * M, Pv); // just under the recorded road
+    pos.setXYZ(i, Pv.x, Pv.y, Pv.z);
+  }
+  geo.computeBoundingSphere();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false, toneMapped: false, side: THREE.DoubleSide }));
+  mesh.renderOrder = -1;
+  mesh.visible = false;
+  scene.add(mesh);
+  mapLayer.underlay = mesh;
+  $("mapAttr").textContent = MAP_ATTR;
+}
+const mapBuilt = buildMapLayer().catch((e) => console.warn("map layer failed:", e));
+// the underlay fades in under the drone camera only
+function updateUnderlay(dt, on) {
+  const m = mapLayer.underlay;
+  if (!m) return;
+  const target = on ? 0.9 : 0;
+  m.material.opacity += (target - m.material.opacity) * (dt == null ? 1 : 1 - Math.exp(-4 * dt));
+  m.visible = m.material.opacity > 0.01;
+}
+
+// minimap: heading-up; map tiles (when the clip has GPS), the recorded road, and in drive mode the
+// drivable corridor with the area outside it hatched. (cx, cz, psi) = car ground position + heading.
 const mm = $("minimap"), mmCtx = mm.getContext("2d");
 const hatch = (() => {
   const c = document.createElement("canvas"); c.width = c.height = 8;
@@ -1248,21 +1475,36 @@ const hatch = (() => {
   g.beginPath(); g.moveTo(0, 8); g.lineTo(8, 0); g.stroke();
   return mmCtx.createPattern(c, "repeat");
 })();
-function drawMinimap() {
-  const S = mm.width, scale = S / 160; // 160 m across
-  const sp = Math.sin(drive.psi), cp = Math.cos(drive.psi);
-  const proj = (pt) => { const dx = pt.x - drive.x, dz = pt.z - drive.z; return [S / 2 - (dx * cp - dz * sp) * scale, S / 2 - (dx * sp + dz * cp) * scale]; };
+function drawMinimap(cx, cz, psi, corridor) {
+  const S = mm.width, scale = S / 200; // 200 m across
+  const sp = Math.sin(psi), cp = Math.cos(psi);
+  // ground (x, z) -> minimap pixels: affine, so it also places the tile canvas
+  const proj = (x, z) => { const dx = x - cx, dz = z - cz; return [S / 2 - (dx * cp - dz * sp) * scale, S / 2 - (dx * sp + dz * cp) * scale]; };
   mmCtx.save();
   mmCtx.clearRect(0, 0, S, S);
   mmCtx.beginPath(); mmCtx.arc(S / 2, S / 2, S / 2 - 1, 0, Math.PI * 2); mmCtx.clip();
-  mmCtx.fillStyle = hatch; mmCtx.fillRect(0, 0, S, S);
+  if (corridor) { mmCtx.fillStyle = hatch; mmCtx.fillRect(0, 0, S, S); }
+  if (mapLayer.ready) {
+    const A = mapLayer.px2xz, o = proj(A.c, A.f), ex = proj(A.a + A.c, A.d + A.f), ey = proj(A.b + A.c, A.e + A.f);
+    mmCtx.save();
+    mmCtx.globalAlpha = corridor ? 0.75 : 1;
+    mmCtx.setTransform(ex[0] - o[0], ex[1] - o[1], ey[0] - o[0], ey[1] - o[1], o[0], o[1]);
+    mmCtx.imageSmoothingQuality = "high";
+    mmCtx.drawImage(mapLayer.canvas, 0, 0);
+    mmCtx.restore();
+  }
   mmCtx.lineJoin = mmCtx.lineCap = "round";
-  const line = () => { mmCtx.beginPath(); GP.forEach((pt, i) => { const [x, y] = proj(pt); i ? mmCtx.lineTo(x, y) : mmCtx.moveTo(x, y); }); };
-  line(); mmCtx.strokeStyle = "rgba(14,16,20,.96)"; mmCtx.lineWidth = DRV.soft * 2 * scale; mmCtx.stroke();
+  const line = () => { mmCtx.beginPath(); GP.forEach((pt, i) => { const [x, y] = proj(pt.x, pt.z); i ? mmCtx.lineTo(x, y) : mmCtx.moveTo(x, y); }); };
+  if (corridor) { line(); mmCtx.strokeStyle = mapLayer.ready ? "rgba(14,16,20,.55)" : "rgba(14,16,20,.96)"; mmCtx.lineWidth = DRV.soft * 2 * scale; mmCtx.stroke(); }
   line(); mmCtx.strokeStyle = "rgba(61,123,255,.9)"; mmCtx.lineWidth = 2.5 * (S / 150); mmCtx.stroke();
   mmCtx.restore();
+  const k = S / 150;
   mmCtx.fillStyle = "#fff";
-  mmCtx.beginPath(); mmCtx.moveTo(S / 2, S / 2 - 9 * (S / 150)); mmCtx.lineTo(S / 2 + 6 * (S / 150), S / 2 + 6 * (S / 150)); mmCtx.lineTo(S / 2, S / 2 + 2 * (S / 150)); mmCtx.lineTo(S / 2 - 6 * (S / 150), S / 2 + 6 * (S / 150)); mmCtx.closePath(); mmCtx.fill();
+  mmCtx.beginPath(); mmCtx.moveTo(S / 2, S / 2 - 9 * k); mmCtx.lineTo(S / 2 + 6 * k, S / 2 + 6 * k); mmCtx.lineTo(S / 2, S / 2 + 2 * k); mmCtx.lineTo(S / 2 - 6 * k, S / 2 + 6 * k); mmCtx.closePath(); mmCtx.fill();
+}
+function showMinimap(on) {
+  setHidden("minimap", !on);
+  setHidden("mapAttr", !(on && mapLayer.ready) && !(mapLayer.underlay?.visible));
 }
 let edgeToastShown = false, mmFrame = 0;
 function driveFrame(rdt) {
@@ -1284,7 +1526,8 @@ function driveFrame(rdt) {
   if ((drive.edge ?? 0) >= 0.05) $("edge").style.opacity = String(0.35 + 0.65 * drive.edge);
   if ((drive.d ?? 0) > DRV.soft && !COLL?.wallDist) { if (!edgeToastShown) { toast("Leaving the reconstructed area", 2400); edgeToastShown = true; } }
   else edgeToastShown = false;
-  if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(); // ~20 Hz is plenty
+  if ((mmFrame = (mmFrame + 1) % 3) === 0) drawMinimap(drive.x, drive.z, drive.psi, true); // ~20 Hz is plenty
+  updateUnderlay(rdt, false);
   sound.update({ speed: Math.abs(drive.u ?? 0), throttle: inp.throttle, slip: drive.slip, reverse: drive.gear === "R" && Math.abs(drive.u ?? 0) > 0.05 || (drive.gear === "R" && inp.brake > 0.05), drive: true });
 }
 let playingDrive = true; // Start/pause inside drive mode (P key)
@@ -1419,7 +1662,7 @@ const sound = (() => {
   return { horn, update, impact, toggleMute, get ready() { return !!ctx; } };
 })();
 $("mute").onclick = () => sound.toggleMute();
-window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek }; // debug handle (tests)
+window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek, get carApi() { return carApi; }, get mapLayer() { return mapLayer; }, get GEO() { return GEO; } }; // debug handle (tests)
 function loop(now) {
   const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
   last = now;
@@ -1439,7 +1682,7 @@ function loop(now) {
 
   if (mode === "drive" && ready) {
     driveFrame(rdt);
-    car.visible = carVisibleFrom(camera);
+    car.visible = carSettled && carVisibleFrom(camera);
     ribbon.visible = false;
     updateKeyLight();
     renderer.render(scene, camera);
@@ -1450,10 +1693,16 @@ function loop(now) {
   placeCar(ps, clock);
   updateRibbon(clock);
   updateCamera(ps, dt, rdt);
-  car.visible = ready && carVisibleFrom(camera);
+  car.visible = ready && carSettled && carVisibleFrom(camera);
   ribbon.visible = ready;
   updateKeyLight();
   hud(clock);
+  updateUnderlay(rdt, mode === "drone");
+  if (mode === "drone" && (mmFrame = (mmFrame + 1) % 3) === 0) {
+    const g = toGround(ps.carPos);
+    drawMinimap(g.x, g.z, Math.atan2(ps.f.dot(GX), ps.f.dot(GZ)), false);
+    showMinimap(true);
+  }
   const s = telAt(clock);
   sound.update({ speed: s ? s.mph / 2.23694 : 0, playing, reverse: s?.gear === "R" });
   renderer.render(scene, camera);
@@ -1469,12 +1718,19 @@ function loop(now) {
  *   otrvRender.duration   clip length in seconds (path.json "dur").
  *   await otrvRender.frame(t, layer = "full", { cam = "chase" } = {})
  *       -> { t, layer, cam, width, height, sortFrames }
+ *     (the third argument may also be a bare cam string: frame(t, "full", "drone"))
  *     t      clip time in seconds (clamped to [0, duration]).
  *     layer  "splat"   the reconstruction only; car, ribbon and contact shadow hidden; opaque.
  *            "overlay" car + ribbon + contact shadow over a TRANSPARENT background (clear alpha 0,
  *                      straight alpha in toDataURL / screenshots); the splat is hidden.
  *            "full"    everything (no UI chrome); opaque.
- *     cam    "chase" | "driver".
+ *     cam    "chase"  spring chase camera behind the car (default).
+ *            "driver" the front camera's view (the car is hidden: the camera is inside it).
+ *            "free"   a fixed front-left three-quarter view of the car (the free-orbit reset view).
+ *            "drone"  high rear view, 11 m back / 8 m up; also shows the GPS map underlay in the splat /
+ *                     full layers when the clip has GPS (the tiles are background, not overlay).
+ *   otrvRender.credit     attribution text of the installed car model ("" for the built-in car), for
+ *                         the renderer to stamp on exported video (the on-page credit is hidden here).
  *   What a call does: sets the clock to t and pauses the camera videos; poses car, lamps, wheels,
  *   ribbon and camera with no smoothing lag (the chase heading spring is simulated from t-3 s at a
  *   fixed 60 Hz, so the image depends only on t); then renders frames until Spark's asynchronous
@@ -1490,8 +1746,11 @@ function sparkSettled() {
   return !spark.sorting && !spark.sortDirty && spark.sortedCenter.distanceTo(_v) < 1e-6 + 1e-4 * M && spark.display === spark.current;
 }
 let renderBusy = Promise.resolve();
-async function renderFrame(t, layer = "full", { cam = "chase" } = {}) {
+const RENDER_CAMS = ["chase", "driver", "free", "drone"];
+async function renderFrame(t, layer = "full", opts = {}) {
+  const cam = (typeof opts === "string" ? opts : opts?.cam) ?? "chase"; // { cam } or a bare cam string
   if (!["splat", "overlay", "full"].includes(layer)) throw new Error(`otrvRender: unknown layer "${layer}"`);
+  if (!RENDER_CAMS.includes(cam)) throw new Error(`otrvRender: unknown cam "${cam}" (use ${RENDER_CAMS.join(" | ")})`);
   t = clamp(+t || 0, 0, DUR);
   clock = t;
   setPlaying(false);
@@ -1503,7 +1762,12 @@ async function renderFrame(t, layer = "full", { cam = "chase" } = {}) {
   placeCar(ps, t);
   updateRibbon(t);
   if (cam === "driver") driverPose(modePose, ps);
-  else { settleChaseSpring(t); chasePose(modePose, ps.carPos, chaseSpring.f); }
+  else if (cam === "free") { // fixed front-left three-quarter view of the car (the free-mode reset view)
+    const left = _v2.crossVectors(UP, ps.f).normalize();
+    const eye = ps.carPos.clone().addScaledVector(ps.f, 5.2 * M).addScaledVector(left, 4.6 * M).addScaledVector(UP, 2.1 * M);
+    lookPose(modePose, eye, ps.carPos.clone().addScaledVector(UP, 0.8 * M), 50);
+  } else { settleChaseSpring(t); chasePose(modePose, ps.carPos, chaseSpring.f, cam === "drone" ? DRONE : CHASE); }
+  if (mapLayer.underlay) { mapLayer.underlay.material.opacity = 0.9; mapLayer.underlay.visible = cam === "drone" && layer !== "overlay"; }
   applyPose(modePose);
   camera.updateMatrixWorld();
   const overlay = layer !== "splat";
@@ -1538,11 +1802,12 @@ if (RENDER) {
     // calls are serialised so overlapping requests can't interleave poses
     frame: (t, layer, opts) => (renderBusy = renderBusy.then(() => renderFrame(t, layer, opts), () => renderFrame(t, layer, opts))),
   });
-  sceneReady.then(async () => { await raf(); renderer.render(scene, camera); }).then(resolveReady, rejectReady);
+  const mapWait = Promise.race([mapBuilt, new Promise((r) => setTimeout(r, 8000))]); // offline: don't hang
+  Promise.all([sceneReady, carLoaded, mapWait]).then(async () => { await raf(); renderer.render(scene, camera); }).then(resolveReady, rejectReady);
 } else {
   window.otrvRender.duration = DUR;
   window.otrvRender.frame = async () => { throw new Error("otrvRender.frame needs ?render=1"); };
-  sceneReady.then(resolveReady, rejectReady);
+  Promise.all([sceneReady, carLoaded]).then(() => resolveReady(), rejectReady);
   renderer.setAnimationLoop(loop);
 }
 </script>

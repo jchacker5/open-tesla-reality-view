@@ -288,5 +288,178 @@ export function buildCar(THREE, { paint = "#f2f3f5" } = {}) {
     setSteer(rad) { for (const w of front) w.rotation.y = rad; },
     setWheelSpin(rad) { for (const w of wheels) w.userData.spin.rotation.x = rad; },
     setHeadlights(on) { mats.drl.color.setScalar(on ? 1.25 : 0.93); },
+    dims: { wheelbase: DIMS.wheelbase, wheelR: DIMS.wheelR, length: DIMS.length },
+  };
+}
+
+// ---- user model (models/car.json + a glTF), see viewer/models/README.md ----
+//   fitModelCar(THREE, root, cfg) -> same API as buildCar, plus { meshes, wheelsFound }
+// root is the loaded gltf.scene. cfg = car.json: { file, lengthM, paint, credit, source: { axes } }.
+//   axes     "+Y up, -Z forward" style string (cfg.axes or cfg.source.axes). Without it the nose is
+//            guessed from where the head lamps sit relative to the tail lamps.
+//   lengthM  overall length in metres; the model is scaled uniformly to it.
+//   paint    body colour; materials named like "exterior_paint" (or paint / body colour / carpaint)
+//            become a pearl-white clearcoat in that colour.
+// Lamps by material name: taillight / tail light / rear lamp brighten on brake; signature / headlight /
+// DRL brighten with the headlights. The outer left / right parts of both (|x| > 0.42 m) flash amber as
+// blinkers (triangles are split per side into their own material groups, so one mesh spanning the
+// whole width still blinks per side). Wheels: tyre meshes (tire / tyre) mark the four wheel centres;
+// wheel, rim, rotor and caliper meshes near a centre are re-parented to a pivot there, so the fronts
+// steer and all four spin (calipers steer but don't spin).
+const AXIS_RE = (word) => new RegExp(`([+-])\\s*([xyz])\\s*${word}`, "i");
+const PAINT_RE = /exterior_paint|paint|body.?colou?r|carpaint/i;
+const NOT_PAINT_RE = /glass|window|lamp|light|lens|led|tire|tyre|wheel|rim|brake|caliper|rotor|interior|leather|seat|trim|rubber/i;
+const TAIL_RE = /taillight|tail.?light|rear.?lamp|brake.?light/i;
+const HEAD_RE = /signature|headlight|head.?lamp|front.?light|\bdrl\b/i;
+const TYRE_RE = /tire|tyre/i;
+const WHEEL_RE = /wheel|rim|tire|tyre|brake|caliper|rotor|hub|spoke/i;
+
+export function fitModelCar(THREE, root, cfg = {}) {
+  const label = (o, m) => `${o.name} ${m?.name ?? ""}`;
+  const matsOf = (o) => (Array.isArray(o.material) ? o.material : [o.material]);
+  const meshes = [];
+  root.traverse((o) => { if (o.isMesh) meshes.push(o); });
+  const boxOf = (o) => new THREE.Box3().setFromObject(o);
+  // ---- orientation: model axes -> car-local (+x left, +y up, +z forward) ----
+  const axesStr = cfg.axes ?? cfg.source?.axes ?? "";
+  const parseAxis = (word) => {
+    const m = AXIS_RE(word).exec(axesStr);
+    if (!m) return null;
+    const v = new THREE.Vector3();
+    v.setComponent("xyz".indexOf(m[2].toLowerCase()), m[1] === "-" ? -1 : 1);
+    return v;
+  };
+  const up = parseAxis("up") ?? new THREE.Vector3(0, 1, 0);
+  let fwd = parseAxis("forward") ?? parseAxis("front");
+  root.updateMatrixWorld(true);
+  if (!fwd) { // guess: the nose is where the head lamps are (vs the tail lamps), along the longest horizontal axis
+    const size = boxOf(root).getSize(new THREE.Vector3());
+    const ax = Math.abs(up.x) > 0.5 ? (size.y > size.z ? 1 : 2) : Math.abs(up.y) > 0.5 ? (size.x > size.z ? 0 : 2) : (size.x > size.y ? 0 : 1);
+    let f = 0, nf = 0, r = 0, nr = 0;
+    for (const o of meshes) for (const m of matsOf(o)) {
+      const c = boxOf(o).getCenter(new THREE.Vector3()).getComponent(ax);
+      if (TAIL_RE.test(label(o, m))) { r += c; nr++; } else if (HEAD_RE.test(label(o, m))) { f += c; nf++; }
+    }
+    fwd = new THREE.Vector3();
+    fwd.setComponent(ax, nf && nr && f / nf < r / nr ? -1 : 1);
+  }
+  const left = new THREE.Vector3().crossVectors(up, fwd).normalize();
+  const orient = new THREE.Group();
+  orient.quaternion.setFromRotationMatrix(new THREE.Matrix4().set(
+    left.x, left.y, left.z, 0, up.x, up.y, up.z, 0, fwd.x, fwd.y, fwd.z, 0, 0, 0, 0, 1));
+  orient.add(root);
+  // ---- scale to lengthM, then put the wheelbase middle at the origin with the tyres on y = 0 ----
+  const fit = new THREE.Group();
+  fit.add(orient);
+  fit.updateMatrixWorld(true);
+  const measured = Math.max(1e-6, boxOf(fit).getSize(new THREE.Vector3()).z);
+  fit.scale.setScalar(Number(cfg.lengthM) > 0 ? Number(cfg.lengthM) / measured : 1);
+  fit.updateMatrixWorld(true);
+  const tyres = meshes.filter((o) => matsOf(o).some((m) => TYRE_RE.test(label(o, m))));
+  {
+    const all = boxOf(fit), tb = tyres.map(boxOf), cz = tb.map((b) => (b.min.z + b.max.z) / 2);
+    const ground = tb.length ? Math.min(...tb.map((b) => b.min.y)) : all.min.y;
+    const zMid = cz.length >= 2 ? (Math.max(...cz) + Math.min(...cz)) / 2 : (all.min.z + all.max.z) / 2;
+    fit.position.set(-(all.min.x + all.max.x) / 2, -ground, -zMid);
+  }
+  const group = new THREE.Group(), body = new THREE.Group();
+  group.add(body);
+  body.add(fit);
+  group.updateMatrixWorld(true);
+  const all = boxOf(fit);
+  const tyreBoxes = tyres.map(boxOf);
+  const centres = tyreBoxes.map((b) => b.getCenter(new THREE.Vector3()));
+  // ---- materials: paint, lamps (with per-side blinker groups), shadows ----
+  const paint = new THREE.Color(cfg.paint || "#f2f3f5");
+  const amber = new THREE.Color(1.0, 0.36, 0.0);
+  const clones = new Map();
+  const lamp = { tail: [], head: [], blinkL: [], blinkR: [] };
+  const remat = (m, make) => { if (!clones.has(m)) clones.set(m, make(m)); return clones.get(m); };
+  const paintMat = (m) => {
+    const p = new THREE.MeshPhysicalMaterial({ name: m.name, color: paint, metalness: 0.02, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.035,
+      sheen: 0.35, sheenColor: new THREE.Color(0.92, 0.95, 1.0), sheenRoughness: 0.45, side: m.side, envMapIntensity: 1.1 });
+    return p;
+  };
+  const lampMat = (m, kind) => {
+    const c = m.clone();
+    c.toneMapped = false;
+    c.userData = { kind, base: c.emissive?.clone() ?? new THREE.Color(), baseI: c.emissiveIntensity ?? 1 };
+    return c;
+  };
+  const SIDE = 0.42;
+  const _p = new THREE.Vector3(), _q = new THREE.Vector3(), _r = new THREE.Vector3();
+  for (const o of meshes) {
+    o.castShadow = o.receiveShadow = false;
+    const mats = matsOf(o);
+    if (mats.length !== 1 || !mats[0]) continue;
+    const m = mats[0], lb = label(o, m);
+    if (PAINT_RE.test(lb) && !NOT_PAINT_RE.test(lb)) { o.material = remat(m, paintMat); continue; }
+    const kind = TAIL_RE.test(lb) ? "tail" : HEAD_RE.test(lb) ? "head" : null;
+    if (!kind) continue;
+    const base = lampMat(m, kind);
+    lamp[kind].push(base);
+    // split triangles into centre / left / right material groups by their car-local x
+    const g = o.geometry.index ? o.geometry.clone() : o.geometry.clone().setIndex([...Array(o.geometry.attributes.position.count).keys()]);
+    const pos = g.attributes.position, idx = g.index;
+    const buckets = [[], [], []];
+    for (let i = 0; i < idx.count; i += 3) {
+      const a = idx.getX(i), b = idx.getX(i + 1), c = idx.getX(i + 2);
+      _p.fromBufferAttribute(pos, a).add(_q.fromBufferAttribute(pos, b)).add(_r.fromBufferAttribute(pos, c)).multiplyScalar(1 / 3).applyMatrix4(o.matrixWorld);
+      buckets[_p.x > SIDE ? 1 : _p.x < -SIDE ? 2 : 0].push(a, b, c);
+    }
+    if (!buckets[1].length && !buckets[2].length) { o.material = base; continue; }
+    g.setIndex([...buckets[0], ...buckets[1], ...buckets[2]]);
+    g.clearGroups();
+    let start = 0;
+    buckets.forEach((bk, k) => { if (bk.length) g.addGroup(start, bk.length, k); start += bk.length; });
+    const L = lampMat(m, kind), R = lampMat(m, kind);
+    lamp[kind].push(L, R); lamp.blinkL.push(L); lamp.blinkR.push(R);
+    o.geometry = g;
+    o.material = [base, L, R];
+  }
+  // ---- wheels ----
+  const wheels = [], front = [];
+  const used = new Set();
+  for (const c of centres) {
+    const pivot = new THREE.Group(), spin = new THREE.Group();
+    pivot.position.copy(c);
+    pivot.add(spin);
+    group.add(pivot);
+    pivot.updateMatrixWorld(true);
+    wheels.push({ pivot, spin });
+    if (c.z > 0) front.push(pivot);
+  }
+  if (centres.length === 4) {
+    const r = Math.max(...tyreBoxes.map((b) => (b.max.y - b.min.y) / 2));
+    for (const o of meshes) {
+      if (used.has(o) || !matsOf(o).some((m) => WHEEL_RE.test(label(o, m)))) continue;
+      const b = boxOf(o), c = b.getCenter(new THREE.Vector3()), s = b.getSize(new THREE.Vector3());
+      if (Math.max(s.x, s.y, s.z) > r * 2.4) continue;
+      let best = -1, bd = Infinity;
+      centres.forEach((w, k) => { const d = w.distanceTo(c); if (d < bd) { bd = d; best = k; } });
+      if (bd > r * 0.9) continue;
+      used.add(o);
+      const caliper = matsOf(o).some((m) => /caliper/i.test(label(o, m)));
+      (caliper ? wheels[best].pivot : wheels[best].spin).attach(o);
+    }
+  }
+  const wheelR = tyreBoxes.length ? Math.max(...tyreBoxes.map((b) => (b.max.y - b.min.y) / 2)) : DIMS.wheelR;
+  const zs = centres.map((c) => c.z);
+  const setI = (m, i) => { m.emissiveIntensity = i; };
+  let brake = false, blink = [false, false], heads = false;
+  const apply = () => {
+    for (const m of lamp.tail) { m.emissive.copy(m.userData.base); setI(m, m.userData.baseI * (brake ? 1.5 : 0.5)); }
+    for (const m of lamp.head) { m.emissive.copy(m.userData.base); setI(m, m.userData.baseI * (heads ? 1.15 : 0.8)); }
+    for (const [list, on] of [[lamp.blinkL, blink[0]], [lamp.blinkR, blink[1]]]) for (const m of list) if (on) { m.emissive.copy(amber); setI(m, 1.0); }
+  };
+  apply();
+  return {
+    group, body, meshes, wheelsFound: wheels.length === 4 && used.size > 0,
+    setBrake(on) { if (on !== brake) { brake = on; apply(); } },
+    setBlink(l, r) { if (l !== blink[0] || r !== blink[1]) { blink = [l, r]; apply(); } },
+    setSteer(rad) { for (const p of front) p.rotation.y = rad; },
+    setWheelSpin(rad) { for (const w of wheels) w.spin.rotation.x = rad; },
+    setHeadlights(on) { if (on !== heads) { heads = on; apply(); } },
+    dims: { wheelbase: zs.length >= 2 ? Math.max(...zs) - Math.min(...zs) : DIMS.wheelbase, wheelR, length: all.max.z - all.min.z },
   };
 }

@@ -156,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument(
         "--eval", action="store_true", help="hold out every 8th view (not trained on) so `otrv bench` can report PSNR"
     )
+    a.add_argument("--seed", type=int, default=42, help="Brush random seed (fixed, so A/B runs differ by the lever)")
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -263,12 +264,18 @@ def cmd_recon(args) -> None:
         timings["undistort"] = time.perf_counter() - t0
     recon.export_path(work, dense)
     t0 = time.perf_counter()
-    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0)
+    recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, ["--seed", str(args.seed)])
     timings["train"] = time.perf_counter() - t0
     timings_path.write_text(json.dumps({k: round(v, 1) for k, v in timings.items()}))
     (work / "recon_args.json").write_text(
         json.dumps(
-            {"steps": args.steps, "global_mapper": args.global_mapper, "rig": not args.no_rig, "eval": args.eval}
+            {
+                "steps": args.steps,
+                "global_mapper": args.global_mapper,
+                "rig": not args.no_rig,
+                "eval": args.eval,
+                "seed": args.seed,
+            }
         )
     )
     print(f"done: `otrv view {args.name}` to replay it, `otrv bench {args.name}` to score it")

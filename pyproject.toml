@@ -7,6 +7,8 @@ dependencies = ["numpy>=1.26", "pillow>=10", "scipy>=1.11"]
 
 [project.optional-dependencies]
 movers = ["ultralytics>=8.3"]
+# Bench v2 LPIPS, Depth Anything V2 dense init, the sky segmentation model: ~1 GB (PyTorch).
+quality = ["torch>=2.3", "torchvision>=0.18", "lpips>=0.1.4", "transformers>=4.45"]
 
 [project.scripts]
 otrv = "tsplat.__main__:main"

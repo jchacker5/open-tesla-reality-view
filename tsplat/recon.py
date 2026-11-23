@@ -196,9 +196,12 @@ def export_every(steps: int) -> int:
     return steps // 4 if steps % 4 == 0 and steps // 4 >= 1000 else steps
 
 
-def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0) -> Path:
-    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`.
-    splat/ is emptied first so a failed run can't leave an older run's splat or eval renders behind."""
+def train(
+    work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0, extra: list[str] | tuple = ()
+) -> Path:
+    """Train the splat. eval_every=N holds out every Nth view and saves its renders for `otrv bench`;
+    `extra` is passed through to Brush (e.g. --seed). splat/ is emptied first so a failed run can't
+    leave an older run's splat or eval renders behind."""
     out = work / "splat"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
@@ -213,6 +216,7 @@ def train(work: Path, dense: Path, steps: int, viewer: bool, eval_every: int = 0
         str(export_every(steps)),
         "--export-name",
         "splat_{iter}.ply",
+        *extra,
     ]
     if viewer:
         args.append("--with-viewer")

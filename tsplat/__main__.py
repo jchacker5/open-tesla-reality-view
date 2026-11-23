@@ -25,7 +25,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, densify, doctor, ingest, prep, recon, serve, sky, speed
+from . import bench, brush, colornorm, densify, doctor, ingest, prep, recon, serve, sky, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -183,6 +183,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="seed Brush with Depth Anything V2 depth fitted to the SfM points, plus a road ribbon "
         "(needs `uv sync --extra quality`; ~0.1 s per image on an M4)",
     )
+    a.add_argument(
+        "--color-norm",
+        action="store_true",
+        help="match every camera's colour to the front camera (LAB mean/std over a running 4 s window)",
+    )
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -283,6 +288,7 @@ def cmd_recon(args) -> None:
     dense = work / "dense"
     timings_path = work / "timings.json"
     timings = json.loads(timings_path.read_text()) if args.skip_sfm and timings_path.exists() else {}
+    timings = {k: v for k, v in timings.items() if k in ("sfm", "undistort")}  # only the stages we reuse
     t0 = time.perf_counter()
     if not args.skip_sfm:
         model = recon.sfm(work, args.global_mapper, not args.no_rig)
@@ -294,6 +300,10 @@ def cmd_recon(args) -> None:
     else:
         dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
+    if args.color_norm:  # before dense init, so the init points get the normalised colours
+        t0 = time.perf_counter()
+        colornorm.run(dense, json.loads((work / "meta.json").read_text())["fps"])
+        timings["color_norm"] = time.perf_counter() - t0
     if args.dense_init:
         t0 = time.perf_counter()
         densify.run(work, dense)
@@ -314,6 +324,7 @@ def cmd_recon(args) -> None:
                 "prune": args.prune,
                 "sky": args.sky,
                 "dense_init": args.dense_init,
+                "color_norm": args.color_norm,
             }
         )
     )

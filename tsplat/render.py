@@ -65,6 +65,7 @@ class Options:
     stabilize_strength: float = 0.3
     label: bool = True
     keep_frames: bool = False
+    clean_cache: bool = False
     headed: bool = False
     swiftshader: bool = False
     accept_license: bool = False
@@ -310,17 +311,29 @@ def encode(frames: Iterable[np.ndarray], out: Path, fps: float, size: tuple[int,
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
            "-r", f"{fps:g}", "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "18",
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]  # fmt: skip
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    n = 0
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = bytearray()  # drained in a thread, so a chatty ffmpeg can't block on a full stderr pipe
+    reader = threading.Thread(target=lambda: err.extend(p.stderr.read()), daemon=True)
+    reader.start()
+    n, broken = 0, False
     try:
         for f in frames:
-            p.stdin.write(np.ascontiguousarray(f, dtype=np.uint8).tobytes())
+            try:
+                p.stdin.write(np.ascontiguousarray(f, dtype=np.uint8).tobytes())
+            except BrokenPipeError:  # ffmpeg exited early: its stderr says why
+                broken = True
+                break
             n += 1
     finally:
-        p.stdin.close()
+        try:
+            p.stdin.close()
+        except BrokenPipeError:
+            broken = True
         rc = p.wait()
-    if rc:
-        raise subprocess.CalledProcessError(rc, cmd)
+        reader.join(5)
+    if rc or broken:
+        why = err.decode("utf-8", "replace").strip()[-2000:] or "(ffmpeg printed nothing)"
+        raise SystemExit(f"ffmpeg failed (exit code {rc}) after {n} frames -> {out}:\n{why}")
     return n
 
 
@@ -386,7 +399,7 @@ def run(work: Path, viewer_html: bytes, opts: Options) -> Path:
         if opts.enhance == "difix-ref":
             meta = json.loads((work / "meta.json").read_text())
             ref_for = lambda i: enhance.nearest_reference(images, float(meta["fps"]), times[i])  # noqa: E731
-        base = enhance.enhance_frames(raw, frames / opts.enhance, enhance.Difix(opts.enhance), ref_for)
+        base = enhance.enhance_frames(raw, frames / opts.enhance, _LazyDifix(opts.enhance), ref_for)
         timings["enhance"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -394,10 +407,41 @@ def run(work: Path, viewer_html: bytes, opts: Options) -> Path:
     timings["encode"] = time.perf_counter() - t0
     secs = ", ".join(f"{k} {v:.1f} s" for k, v in timings.items())
     print(f"render: {n} frames ({n / opts.fps:.1f} s at {opts.fps:g} fps) -> {opts.out}  [{secs}]")
-    if not opts.keep_frames:
+    clean_up(frames, opts)
+    return opts.out
+
+
+def clean_up(frames: Path, opts: Options) -> None:
+    """After a successful encode: --keep-frames keeps everything; --clean-cache deletes everything; by
+    default the raw captures (cheap to redo) go and the enhanced frames (minutes each) stay, so re-running
+    with other encode options skips the enhancer."""
+    if opts.keep_frames:
+        return
+    if opts.clean_cache:
+        shutil.rmtree(frames, ignore_errors=True)
+        print(f"(render cache deleted: {frames})")
+        return
+    for d in ("splat", "overlay"):
+        shutil.rmtree(frames / d, ignore_errors=True)
+    kept = sorted(d.name for d in frames.iterdir() if d.is_dir()) if frames.is_dir() else []
+    if kept:
+        print(f"(raw frames deleted; enhanced frames kept in {frames}/{{{','.join(kept)}}} so a re-run skips "
+              "enhancing; --clean-cache deletes them, --keep-frames keeps everything)")  # fmt: skip
+    else:
         shutil.rmtree(frames, ignore_errors=True)
         print("(frames deleted; --keep-frames keeps them for re-encoding or re-enhancing)")
-    return opts.out
+
+
+class _LazyDifix:
+    """Load the model on the first frame that actually needs it: a fully cached run never loads it."""
+
+    def __init__(self, mode: str):
+        self.mode, self.model = mode, None
+
+    def __call__(self, img, ref=None):
+        if self.model is None:
+            self.model = enhance.Difix(self.mode)
+        return self.model(img, ref)
 
 
 def env_swiftshader() -> bool:

@@ -117,6 +117,78 @@ def _probe(path):
     return json.loads(r.stdout)["streams"][0]
 
 
+def _fake_ffmpeg(tmp_path, monkeypatch, body: str):
+    exe = tmp_path / "ffmpeg"
+    exe.write_text("#!/bin/sh\n" + body)
+    exe.chmod(0o755)
+    monkeypatch.setattr(render.shutil, "which", lambda name: str(exe))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="shell-script ffmpeg stand-in")
+def test_encode_surfaces_ffmpeg_stderr_when_the_pipe_breaks(tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, "head -c 100 >/dev/null\necho \"Unknown encoder 'libx264'\" >&2\nexit 1\n")
+    frames = (np.zeros((480, 640, 3), np.uint8) for _ in range(50))  # ~46 MB: far more than a pipe buffer
+    with pytest.raises(SystemExit) as e:
+        render.encode(frames, tmp_path / "x.mp4", 30, (640, 480))
+    msg = str(e.value.code)
+    assert "Unknown encoder 'libx264'" in msg and "exit code 1" in msg
+
+
+@pytest.mark.skipif(os.name != "posix", reason="shell-script ffmpeg stand-in")
+def test_encode_surfaces_ffmpeg_stderr_on_a_failed_exit(tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, "cat >/dev/null\necho 'x.mp4: No space left on device' >&2\nexit 2\n")
+    with pytest.raises(SystemExit, match="No space left on device"):
+        render.encode(iter([np.zeros((16, 16, 3), np.uint8)]), tmp_path / "x.mp4", 30, (16, 16))
+
+
+# ---- the frame cache -------------------------------------------------------------------------------
+
+
+def _cache(tmp_path):
+    frames = tmp_path / "render"
+    for d in ("splat", "overlay", "difix"):
+        (frames / d).mkdir(parents=True)
+        (frames / d / "00000.png").write_bytes(b"png")
+    (frames / "manifest.json").write_text("{}")
+    return frames
+
+
+def test_cache_default_keeps_enhanced_frames_only(tmp_path):
+    frames = _cache(tmp_path)
+    render.clean_up(frames, render.Options(out=tmp_path / "x.mp4", enhance="difix"))
+    assert sorted(p.name for p in frames.iterdir()) == ["difix", "manifest.json"]
+    assert (frames / "difix" / "00000.png").exists()
+
+
+def test_cache_without_enhanced_frames_is_removed(tmp_path):
+    frames = _cache(tmp_path)
+    import shutil as sh
+
+    sh.rmtree(frames / "difix")
+    render.clean_up(frames, render.Options(out=tmp_path / "x.mp4"))
+    assert not frames.exists()
+
+
+def test_cache_keep_frames_and_clean_cache(tmp_path):
+    frames = _cache(tmp_path)
+    render.clean_up(frames, render.Options(out=tmp_path / "x.mp4", keep_frames=True))
+    assert sorted(p.name for p in frames.iterdir()) == ["difix", "manifest.json", "overlay", "splat"]
+    render.clean_up(frames, render.Options(out=tmp_path / "x.mp4", clean_cache=True))
+    assert not frames.exists()
+
+
+def test_lazy_difix_never_loads_when_every_frame_is_cached(tmp_path, monkeypatch):
+    from tsplat import enhance
+
+    monkeypatch.setattr(enhance, "Difix", lambda mode: pytest.fail("loaded the model with nothing to enhance"))
+    src = [tmp_path / "00000.png"]
+    Image.new("RGB", (8, 8)).save(src[0])
+    out = tmp_path / "difix"
+    out.mkdir()
+    Image.new("RGB", (8, 8)).save(out / "00000.png")
+    assert enhance.enhance_frames(src, out, render._LazyDifix("difix")) == [out / "00000.png"]
+
+
 # ---- CLI guards ------------------------------------------------------------------------------------
 
 
@@ -186,6 +258,10 @@ def test_render_flags_reach_options(work, monkeypatch):
     cli.main(["render", "a"])
     assert got["opts"].stabilize is False and got["opts"].enhance == "none"
     assert "between 0 and 1" in _run("render", "a", "--stabilize-strength", "2")
+    assert got["opts"].keep_frames is False and got["opts"].clean_cache is False
+    cli.main(["render", "a", "--clean-cache"])
+    assert got["opts"].clean_cache is True
+    _run("render", "a", "--clean-cache", "--keep-frames")  # mutually exclusive: argparse exits
 
 
 # ---- the real capture loop against a fake viewer page -----------------------------------------------

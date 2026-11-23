@@ -49,7 +49,8 @@ uv run otrv render drive1 --aspect 1:1 --cam drone --start 4 --end 10 \
 | `--stabilize` / `--no-stabilize` | on with `--enhance` | flow-guided anti-flicker |
 | `--stabilize-strength` | 0.3 | weight of the previous frame in the blend |
 | `--no-label` | | omit the "AI-enhanced" label |
-| `--keep-frames` | | keep the PNGs in `work/<name>/render/` |
+| `--keep-frames` | | keep all PNGs in `work/<name>/render/` (by default the raw captures are deleted after encoding and the enhanced frames are kept, so a re-run skips Difix) |
+| `--clean-cache` | | delete the enhanced frames too |
 | `--headed` | | show the browser window |
 | `--swiftshader` | | CPU WebGL for machines without a GPU (env `OTRV_RENDER_SWIFTSHADER=1`) |
 
@@ -104,7 +105,9 @@ The model runs on Apple's GPU (MPS) in fp16, else CUDA fp16, else CPU fp32 (very
 The renderer prints an estimate up front and a live ETA per frame. Enhancement is resumable:
 each finished frame is saved under `work/<name>/render/<mode>/` (written atomically), so after an
 interruption re-run the same command and it continues where it stopped. Tips: render at
-`--fps 24` or a shorter `--start/--end` window first; frames are kept until encoding succeeds.
+`--fps 24` or a shorter `--start/--end` window first. Enhanced frames stay in that folder after
+encoding too, so re-encoding (another `--out`, `--no-label`, stabilise settings) skips Difix and never
+loads the model; `--clean-cache` deletes them.
 
 ### License notice (read before using `--enhance`)
 

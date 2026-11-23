@@ -198,7 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--stabilize-strength", type=float, default=0.3, help="weight of the previous frame, 0-1")
     a.add_argument("--no-label", action="store_true", help='omit the "AI-enhanced" corner label')
-    a.add_argument("--keep-frames", action="store_true", help="keep the per-frame PNGs in work/<name>/render/")
+    cache = a.add_mutually_exclusive_group()
+    cache.add_argument(
+        "--keep-frames", action="store_true", help="keep every per-frame PNG in work/<name>/render/ (raw and enhanced)"
+    )
+    cache.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="also delete the enhanced frames after encoding (kept by default, so a re-run skips Difix)",
+    )
     a.add_argument(
         "--accept-nvidia-license", action="store_true", help=f"accept Difix's license (or env {enhance.LICENSE_ENV}=1)"
     )
@@ -353,6 +361,7 @@ def cmd_render(args) -> None:
         stabilize_strength=args.stabilize_strength,
         label=not args.no_label,
         keep_frames=args.keep_frames,
+        clean_cache=args.clean_cache,
         headed=args.headed,
         swiftshader=args.swiftshader or render.env_swiftshader(),
         accept_license=args.accept_nvidia_license,

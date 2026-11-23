@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
-import shutil
 import tarfile
 import tempfile
 import urllib.request
@@ -20,6 +19,13 @@ TARGETS = {
     ("Darwin", "arm64"): "aarch64-apple-darwin",
     ("Linux", "x86_64"): "x86_64-unknown-linux-gnu",
     ("Windows", "x86_64"): "x86_64-pc-windows-msvc",
+}
+# SHA-256 of each v0.3.0 asset, pinned in code. setup() also checks the release's own .sha256 file and
+# refuses the download if either disagrees, so a swapped asset + checksum on the release page is caught.
+PINNED_SHA256 = {
+    "brush-app-aarch64-apple-darwin.tar.xz": "65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c",
+    "brush-app-x86_64-unknown-linux-gnu.tar.xz": "4f0f9a8785d1951c62df26aae247c02c5bba32b00f40b06df4e1c9b867399e20",
+    "brush-app-x86_64-pc-windows-msvc.zip": "b68e3e9cf052d51bf3ee30776fa5a364de7f2ba13b58443128ff797bb7bcfcd6",
 }
 NO_INTEL_MAC = (
     f"Brush v{VERSION} has no Intel-Mac build (only aarch64-apple-darwin, x86_64 Linux and x86_64 Windows). "
@@ -107,13 +113,38 @@ def extract(archive: Path, dest: Path) -> None:
             t.extractall(dest)
 
 
-def _download(url: str, out: Path) -> None:
-    print(f"downloading {url}")
+def _download(url: str, out: Path, chunk: int = 1 << 20) -> None:
+    name = url.rsplit("/", 1)[-1]
     with urllib.request.urlopen(url, timeout=60) as r, open(out, "wb") as f:
-        shutil.copyfileobj(r, f)
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while block := r.read(chunk):
+            f.write(block)
+            done += len(block)
+            pct = f" {done * 100 // total:3d}% of {total / 1e6:.0f} MB" if total else ""
+            print(f"\rdownloading {name}: {done / 1e6:.1f} MB{pct}", end="", flush=True)
+    print()
 
 
-def setup(install_dir: Path = INSTALL_DIR, triple: str | None = None, fetch=_download) -> Path:
+def check_digest(file: Path, name: str, published: str, pinned: dict[str, str]) -> None:
+    """The file must match the release's .sha256 AND the digest pinned in code (when one is pinned)."""
+    expected = pinned.get(name)
+    if expected and published.lower() != expected:
+        raise ValueError(
+            f"the release's checksum for {name} ({published}) differs from the one pinned in otrv ({expected}); "
+            "refusing to install"
+        )
+    verify(file, published)
+    if expected:
+        verify(file, expected)
+
+
+def setup(
+    install_dir: Path = INSTALL_DIR,
+    triple: str | None = None,
+    fetch=_download,
+    pinned: dict[str, str] = PINNED_SHA256,
+) -> Path:
     """Download the release asset + its .sha256, verify, extract to install_dir; return the binary path."""
     triple = triple or target()
     if triple is None:
@@ -128,8 +159,8 @@ def setup(install_dir: Path = INSTALL_DIR, triple: str | None = None, fetch=_dow
         archive, sumfile = Path(tmp) / name, Path(tmp) / f"{name}.sha256"
         fetch(BASE_URL + name + ".sha256", sumfile)
         fetch(BASE_URL + name, archive)
-        verify(archive, parse_sha256(sumfile.read_text(), name))
-        print(f"sha256 ok: {name}")
+        check_digest(archive, name, parse_sha256(sumfile.read_text(), name), pinned)
+        print(f"sha256 ok (release .sha256{' + pinned' if name in pinned else ''}): {name}")
         extract(archive, install_dir)
     exe = install_dir / f"brush-app-{triple}" / exe_name(triple)
     if not exe.exists():

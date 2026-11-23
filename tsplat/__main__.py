@@ -11,6 +11,7 @@ otrv recon drive1                          COLMAP -> Brush training -> chase pat
 otrv clean drive1                          re-run the post-train prune + dehaze with other thresholds
 otrv collision drive1                      re-bake drive mode's ground + wall grids (recon does it too)
 otrv view drive1                           open the replay viewer
+otrv studio                                the same steps as a local web app (needs `uv sync --extra studio`)
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import errno
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -50,15 +52,51 @@ WORK = Path("work")
 ROOT = Path(__file__).resolve().parent.parent
 
 
+VIEWER_FILES = ("index.html", "car.js")
+
+
 def viewer_html():
     """The viewer page: packaged in the wheel as tsplat/viewer/index.html, else the repo's viewer/."""
-    packaged = resources.files("tsplat") / "viewer" / "index.html"
+    return viewer_file("index.html")
+
+
+def viewer_file(name: str):
+    """A viewer asset: packaged in the wheel under tsplat/viewer/, else the repo's viewer/."""
+    packaged = resources.files("tsplat") / "viewer" / name
     if packaged.is_file():
         return packaged
-    source = ROOT / "viewer" / "index.html"
+    source = ROOT / "viewer" / name
     if not source.is_file():
-        raise SystemExit("viewer/index.html is missing from this install; reinstall open-tesla-reality-view")
+        raise SystemExit(f"viewer/{name} is missing from this install; reinstall open-tesla-reality-view")
     return source
+
+
+def user_models_dir() -> Path:
+    """User-installed car models (never in the repo): $OTRV_MODELS, else ~/.otrv/models."""
+    return Path(os.environ.get("OTRV_MODELS", Path.home() / ".otrv" / "models")).expanduser()
+
+
+def install_viewer(vd: Path) -> None:
+    """Copy the viewer page + modules into a served run folder, plus the user's car model if any."""
+    for name in VIEWER_FILES:
+        (vd / name).write_bytes(viewer_file(name).read_bytes())
+    out = vd / "models"
+    shutil.rmtree(out, ignore_errors=True)
+    src = user_models_dir()
+    if (src / "car.json").is_file():
+        shutil.copytree(src, out, ignore=shutil.ignore_patterns(".*"))
+    write_viewer_features(vd)
+
+
+def write_viewer_features(vd: Path) -> None:
+    """features.json: which optional viewer files exist, so the page only requests those (no 404s)."""
+    sounds = sorted(p.name for p in (vd / "sounds").glob("*.mp3")) if (vd / "sounds").is_dir() else []
+    features = {
+        "collision": (vd / "collision.json").is_file(),
+        "model": (vd / "models" / "car.json").is_file(),
+        "sounds": sounds,
+    }
+    (vd / "features.json").write_text(json.dumps(features))
 
 
 class Fmt(argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
@@ -349,6 +387,16 @@ def build_parser() -> argparse.ArgumentParser:
     a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
     a.add_argument("name", help="run name")
     a.add_argument("--port", type=int, default=8765, help="local port")
+
+    a = cmd(
+        "studio",
+        "local web app: pick footage, see drives, choose a window, build and open cities "
+        "(needs `uv sync --extra studio`; 127.0.0.1 only)",
+        data=True,
+    )
+    a.add_argument("--port", type=int, default=8770, help="local port (the next free one is used if taken)")
+    a.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    a.add_argument("--max-upload-gb", type=float, default=8, help="size limit per uploaded clip file (GB)")
     return ap
 
 
@@ -528,7 +576,7 @@ def cmd_clean(args) -> None:
 
 def cmd_view(args) -> None:
     vd = need_recon(args.name, "viewer/scene.ply", "viewer/path.json") / "viewer"
-    (vd / "index.html").write_bytes(viewer_html().read_bytes())
+    install_viewer(vd)
     try:
         srv = serve.make_server(vd, args.port)
     except OSError as e:
@@ -543,6 +591,20 @@ def cmd_view(args) -> None:
         print(f"viewer: {url}  (ctrl-c to stop; needs internet for three.js/Spark from the CDN)")
         webbrowser.open(url)
         srv.serve_forever()
+
+
+def cmd_studio(args) -> None:
+    try:
+        from .studio import server
+    except ImportError as e:
+        raise SystemExit(f"otrv studio needs its extra ({e.name} is missing): run `uv sync --extra studio`") from e
+    server.serve(
+        args.data,
+        args.port,
+        open_browser=not args.no_browser,
+        work=str(WORK),
+        max_upload=int(args.max_upload_gb * 1e9),
+    )
 
 
 def cmd_setup_brush(args) -> None:
@@ -607,6 +669,8 @@ def dispatch(args) -> None:
         recon.export_nvs(WORK / args.name, args.fps)
     elif c == "view":
         cmd_view(args)
+    elif c == "studio":
+        cmd_studio(args)
 
 
 def _cmd_str(cmd) -> str:

@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drive Replay</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --bg: #07080a; --panel: #101216; --line: #1f232a; --text: #e8eaee; --dim: #8a909c;
@@ -14,15 +16,24 @@
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; overflow: hidden; }
   .app { display: grid; grid-template-columns: 340px 1fr; height: 100%; gap: 10px; padding: 10px; }
+  .side { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   .label { font: 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin: 2px 2px 6px; }
-  .cams { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: min-content; gap: 6px; overflow: auto; }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: min-content; gap: 6px; overflow: auto; flex: 1; min-height: 0; }
+  .mapwrap { position: relative; height: 230px; flex: none; margin-top: 8px; border-radius: 8px; overflow: hidden; background: #101216; }
+  #map { height: 100%; width: 100%; background: #101216; }
+  .maplabel { position: absolute; z-index: 500; left: 8px; top: 8px; max-width: 70%; pointer-events: none;
+    font: 11px var(--mono); color: var(--text); background: rgba(16,18,22,.82); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 6px; }
+  #mapFollow { position: absolute; z-index: 500; right: 8px; top: 8px; height: 24px; }
+  .leaflet-container { font: 11px var(--mono); background: #101216; }
   .cam { position: relative; background: #000; border-radius: 6px; overflow: hidden; aspect-ratio: 4/3; }
   .cam.wide { grid-column: span 2; aspect-ratio: 16/10; }
   .cam video { width: 100%; height: 100%; object-fit: cover; display: block; }
   .cam span { position: absolute; left: 6px; bottom: 6px; font: 10px var(--mono); letter-spacing: .06em;
     background: rgba(0,0,0,.65); padding: 2px 5px; border-radius: 3px; text-transform: uppercase; }
   .stage { position: relative; border-radius: 10px; overflow: hidden; background: #000; min-width: 0; }
-  canvas { display: block; width: 100%; height: 100%; }
+  .stage > canvas { display: block; width: 100%; height: 100%; }
+  button.rec { border-color: #ff3355; color: #ff3355; }
   .hud { position: absolute; top: 16px; left: 18px; pointer-events: none; text-shadow: 0 1px 6px rgba(0,0,0,.6); }
   .speed { font-size: 64px; font-weight: 300; line-height: 1; font-variant-numeric: tabular-nums; }
   .unit { font: 11px var(--mono); color: var(--dim); letter-spacing: .1em; }
@@ -46,6 +57,7 @@
     body { overflow: auto; }
     .app { grid-template-columns: 1fr; grid-template-rows: 60vh auto; height: auto; padding: 16px; }
     .stage { order: -1; height: 60vh; }
+    .mapwrap { height: 200px; }
     .speed { font-size: 44px; }
   }
   @media (max-width: 560px) {
@@ -56,9 +68,14 @@
 </head>
 <body>
 <div class="app">
-  <aside>
+  <aside class="side">
     <div class="label" id="camsLabel">Dashcam</div>
     <div class="cams" id="cams"></div>
+    <div class="mapwrap">
+      <div id="map"></div>
+      <div class="maplabel" id="mapLabel">locating…</div>
+      <button id="mapFollow" class="on" title="Keep the map on the car">follow</button>
+    </div>
   </aside>
   <main class="stage" id="stage">
     <div class="loading" id="loading">loading splat…</div>
@@ -78,9 +95,10 @@
         <div class="time"><span id="tcur">0:00</span> / <span id="tdur">0:00</span></div>
       </div>
       <div class="btns">
-        <button id="mChase" class="on" title="Chase camera">chase</button>
+        <button id="mChase" class="on" title="Reality View drone, high behind the car">drone</button>
         <button id="mDriver" title="Driver view">driver</button>
         <button id="mFree" title="Free orbit">free</button>
+        <button id="record" title="Record the whole window: every camera, the map, and the main view">record</button>
       </div>
     </div>
   </main>
@@ -97,6 +115,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
@@ -127,14 +147,26 @@ $("camsLabel").textContent = `Dashcam · ${videos.length} cameras`;
 
 // ---- three / spark ----
 const stage = $("stage");
-const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({
+  antialias: false,
+  powerPreference: "high-performance",
+  preserveDrawingBuffer: true, // the one-click recorder copies this canvas after each frame
+});
+renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
 stage.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d10);
-const camera = new THREE.PerspectiveCamera(55, 1, 0.05 * M, 2000 * M);
+const camera = new THREE.PerspectiveCamera(48, 1, 0.05 * M, 2000 * M);
 camera.up.copy(UP);
-scene.add(new SparkRenderer({ renderer }));
+// Street stills are milky off the driven path: faint splats veil the scene and a few
+// huge splats streak into lines. Clip those. On-path surfaces stay.
+scene.add(new SparkRenderer({
+  renderer,
+  maxStdDev: 2,
+  maxPixelRadius: 96,
+  minAlpha: 4 / 255,
+  blurAmount: 0.12,
+}));
 
 const splat = new SplatMesh({
   url: "scene.ply",
@@ -146,8 +178,9 @@ splat.initialized.then(
 );
 scene.add(splat);
 
-// Ego car: an original, stylised white crossover in Model Y proportions (4.75 m long, 1.62 m tall,
-// 2.89 m wheelbase), built from an extruded side profile. Local axes: +z forward, +y up, metres.
+// Stand-in only. The car on screen is the installed Model Y GLB (otrv view copies
+// ~/.otrv/models next to this page). This mesh shows if that file is missing or fails to load.
+// Local axes: +z forward, +y up, metres.
 const car = new THREE.Group();
 function profileMesh(points, width, material, bevel = 0.06) {
   const shape = new THREE.Shape(points.map(([x, y]) => new THREE.Vector2(x, y)));
@@ -202,7 +235,116 @@ for (const x of [-0.72, 0.72]) {
 }
 car.add(tail);
 car.scale.setScalar(M);
+car.visible = false;
 scene.add(car);
+// ~/.otrv/models/car.glb is the 2025 Model Y from BloxBloger, painted white. otrv view copies it here.
+useInstalledCar();
+
+function materialLabel(obj) {
+  const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+  return `${obj.name} ${mats.map((m) => m?.name || "").join(" ")}`;
+}
+function lowestY(root, pattern) {
+  let y = Infinity;
+  root.traverse((obj) => {
+    if (!obj.isMesh || (pattern && !pattern.test(materialLabel(obj)))) return;
+    const box = new THREE.Box3().setFromObject(obj);
+    if (!box.isEmpty()) y = Math.min(y, box.min.y);
+  });
+  return y;
+}
+// Body panels only. Glass, lamps, and anything the name says is not paint stay as authored.
+function applyCarPaint(root, paint) {
+  if (!paint || paint === "none") return;
+  const color = new THREE.Color(paint);
+  const skip = /glass|window|windshield|windscreen|sunroof|lamp|light|lens|led|headlamp|tire|tyre|wheel|rim|brake|caliper|rotor|interior|leather|seat|carpet|trim|rubber/i;
+  const body = /paint|body.?colou?r|carpaint|shell/i;
+  const clones = new Map();
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    let changed = false;
+    const next = mats.map((mat) => {
+      if (!mat) return mat;
+      const label = `${obj.name} ${mat.name || ""}`;
+      if (skip.test(label) || !body.test(label)) return mat;
+      let copy = clones.get(mat);
+      if (!copy) {
+        copy = mat.clone();
+        copy.color.copy(color);
+        clones.set(mat, copy);
+      }
+      changed = true;
+      return copy;
+    });
+    if (changed) obj.material = Array.isArray(obj.material) ? next : next[0];
+  });
+}
+// Length axis and which end is the nose come from the loaded bounds (headlights vs tail lamps).
+// Scale to lengthM metres, yaw so the nose is +Z, then sit the tires on local y=0.
+function fitCarModel(root, cfg) {
+  root.updateMatrixWorld(true);
+  const bounds = new THREE.Box3().setFromObject(root);
+  const size = bounds.getSize(new THREE.Vector3());
+  const alongX = size.x > size.z;
+  const coord = (v) => (alongX ? v.x : v.z);
+  let frontSum = 0, frontN = 0, rearSum = 0, rearN = 0;
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const label = materialLabel(obj);
+    const rear = /taillight|tail.?light|rear.?lamp/i.test(label);
+    const front = !rear && /signature|headlight|headlamp|front.?light|\bdrl\b/i.test(label);
+    if (!front && !rear) return;
+    const c = coord(new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3()));
+    if (front) { frontSum += c; frontN++; } else { rearSum += c; rearN++; }
+  });
+  let nose = 0;
+  if (frontN && rearN) nose = frontSum / frontN >= rearSum / rearN ? 1 : -1;
+  else if (frontN || rearN) {
+    const mid = (coord(bounds.min) + coord(bounds.max)) / 2;
+    const at = frontN ? frontSum / frontN : rearSum / rearN;
+    const end = at >= mid ? 1 : -1;
+    nose = frontN ? end : -end;
+  }
+  const yaw = !nose ? 0 : alongX ? (nose > 0 ? -Math.PI / 2 : Math.PI / 2) : (nose > 0 ? 0 : Math.PI);
+  const measured = Math.max(alongX ? size.x : size.z, 1e-6);
+  const lengthM = Number(cfg.lengthM) > 0 ? Number(cfg.lengthM) : measured;
+  const fit = new THREE.Group();
+  fit.rotation.y = yaw;
+  fit.scale.setScalar(lengthM / measured);
+  fit.add(root);
+  fit.updateMatrixWorld(true);
+  let ground = lowestY(fit, /tire|tyre/i);
+  if (!Number.isFinite(ground)) ground = lowestY(fit, /wheel|rim/i);
+  if (!Number.isFinite(ground)) ground = new THREE.Box3().setFromObject(fit).min.y;
+  if (Number.isFinite(ground)) fit.position.y = -ground;
+  return fit;
+}
+function useInstalledCar() {
+  const standIn = () => { car.visible = true; };
+  fetch("models/car.json").then((r) => (r.ok ? r.json() : null)).then((cfg) => {
+    if (!cfg?.file) { standIn(); return; }
+    const parts = String(cfg.file).split("/");
+    if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("bad car file");
+    const loader = new GLTFLoader();
+    loader.setMeshoptDecoder(MeshoptDecoder);
+    const url = "models/" + parts.map(encodeURIComponent).join("/");
+    return loader.loadAsync(url).then((gltf) => {
+      applyCarPaint(gltf.scene, cfg.paint || "#f2f3f5");
+      car.clear();
+      car.add(fitCarModel(gltf.scene, cfg));
+      car.scale.setScalar(M);
+      car.visible = true;
+      if (cfg.credit) {
+        const line = document.createElement("div");
+        line.textContent = cfg.credit;
+        line.style.maxWidth = "320px";
+        line.style.marginLeft = "auto";
+        $("meta").append(document.createElement("br"), line);
+      }
+    });
+  }).catch((err) => { console.error("installed car failed; keeping the stand-in", err); standIn(); });
+}
 scene.add(new THREE.HemisphereLight(0xdfe6f0, 0x2a2a2a, 1.2));
 // studio reflections for the car paint (splats ignore scene.environment)
 scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
@@ -246,19 +388,23 @@ function updateRibbon(t) {
 }
 
 // ---- camera modes ----
+// Reality View drone, matched to Tesla's high rear view (and Vogel's FSD 15 recreation of it):
+// centered behind the car, high enough that the roof is in frame, car sitting low-center,
+// horizon in the upper third. 11 m back, 8 m up, looking 2.5 m ahead of the rear axle.
+const DRONE_BACK = 11, DRONE_UP = 8, DRONE_AHEAD = 2.5, DRONE_LOOK_H = 0.8;
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enabled = false;
-let mode = "chase";
+let mode = "drone";
 const smoothPos = new THREE.Vector3(), smoothLook = new THREE.Vector3();
 let first = true;
 function setMode(m) {
   mode = m;
-  for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
+  for (const [id, n] of [["mChase", "drone"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
   controls.enabled = m === "free";
   if (m === "free") controls.target.copy(poseAt(clock).road);
   first = true;
 }
-$("mChase").onclick = () => setMode("chase");
+$("mChase").onclick = () => setMode("drone");
 $("mDriver").onclick = () => setMode("driver");
 $("mFree").onclick = () => setMode("free");
 
@@ -305,6 +451,362 @@ function resize() {
 }
 new ResizeObserver(resize).observe(stage);
 
+// ---- SLAM locked onto the clip's GPS (real streets, not a guessed city) ----
+const EARTH_M = 6378137;
+function usableFix(s) {
+  if (!s || s.lat == null || s.lon == null) return false;
+  const lat = +s.lat, lon = +s.lon;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return false;
+  if (Math.abs(lat) < 1e-7 && Math.abs(lon) < 1e-7) return false;
+  return true;
+}
+function vdot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+function vsub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+function vcross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+function vnorm(a) {
+  const n = Math.hypot(a[0], a[1], a[2]);
+  return n < 1e-12 ? [0, 1, 0] : [a[0] / n, a[1] / n, a[2] / n];
+}
+function scenePoint(frames, t) {
+  if (t <= frames[0].t) return frames[0].p;
+  const last = frames[frames.length - 1];
+  if (t >= last.t) return last.p;
+  let i = 1;
+  while (i < frames.length && frames[i].t < t) i++;
+  const a = frames[i - 1], b = frames[i];
+  const k = b.t === a.t ? 0 : (t - a.t) / (b.t - a.t);
+  return [a.p[0] + (b.p[0] - a.p[0]) * k, a.p[1] + (b.p[1] - a.p[1]) * k, a.p[2] + (b.p[2] - a.p[2]) * k];
+}
+// 2D Umeyama. dst ≈ scale * R * src + t. Proper rotation (no mirror).
+function umeyama2(src, dst, forceScale) {
+  const n = src.length;
+  const mean = (pts) => {
+    let x = 0, y = 0;
+    for (const p of pts) { x += p[0]; y += p[1]; }
+    return [x / n, y / n];
+  };
+  const muX = mean(src), muY = mean(dst);
+  const X = src.map((p) => [p[0] - muX[0], p[1] - muX[1]]);
+  const Y = dst.map((p) => [p[0] - muY[0], p[1] - muY[1]]);
+  let s00 = 0, s01 = 0, s10 = 0, s11 = 0, varX = 0;
+  for (let k = 0; k < n; k++) {
+    s00 += Y[k][0] * X[k][0]; s01 += Y[k][0] * X[k][1];
+    s10 += Y[k][1] * X[k][0]; s11 += Y[k][1] * X[k][1];
+    varX += X[k][0] * X[k][0] + X[k][1] * X[k][1];
+  }
+  s00 /= n; s01 /= n; s10 /= n; s11 /= n; varX /= n;
+  const ata00 = s00 * s00 + s10 * s10, ata01 = s00 * s01 + s10 * s11, ata11 = s01 * s01 + s11 * s11;
+  const tr = ata00 + ata11, det = ata00 * ata11 - ata01 * ata01;
+  const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+  const l1 = tr / 2 + disc, l2 = tr / 2 - disc;
+  const sv1 = Math.sqrt(Math.max(0, l1)), sv2 = Math.sqrt(Math.max(0, l2));
+  const ev = (l) => {
+    const x = -ata01, y = ata00 - l, nn = Math.hypot(x, y);
+    return nn < 1e-14 ? [1, 0] : [x / nn, y / nn];
+  };
+  const v1 = ev(l1), v2 = [-v1[1], v1[0]];
+  const applyM = (x, y) => [s00 * x + s01 * y, s10 * x + s11 * y];
+  const Av1 = applyM(v1[0], v1[1]), Av2 = applyM(v2[0], v2[1]);
+  const n1 = Math.hypot(Av1[0], Av1[1]), n2 = Math.hypot(Av2[0], Av2[1]);
+  const u1 = n1 > 1e-14 ? [Av1[0] / n1, Av1[1] / n1] : [1, 0];
+  const u2 = n2 > 1e-14 ? [Av2[0] / n2, Av2[1] / n2] : [-u1[1], u1[0]];
+  const detU = u1[0] * u2[1] - u1[1] * u2[0];
+  const detV = v1[0] * v2[1] - v1[1] * v2[0];
+  const flip = detU * detV < 0;
+  const cu2 = flip ? [-u2[0], -u2[1]] : u2;
+  const R = [
+    [u1[0] * v1[0] + cu2[0] * v2[0], u1[0] * v1[1] + cu2[0] * v2[1]],
+    [u1[1] * v1[0] + cu2[1] * v2[0], u1[1] * v1[1] + cu2[1] * v2[1]],
+  ];
+  let scale = varX > 1e-12 ? ((sv1 + (flip ? -sv2 : sv2)) / varX) : 1;
+  if (forceScale != null) scale = forceScale;
+  const Rmu = [R[0][0] * muX[0] + R[0][1] * muX[1], R[1][0] * muX[0] + R[1][1] * muX[1]];
+  return { scale, R, t: [muY[0] - scale * Rmu[0], muY[1] - scale * Rmu[1]] };
+}
+function alignSlam(pathObj, telemetry) {
+  const raw = pathObj.frames;
+  if (!raw || raw.length < 2) return null;
+  const fixes = (telemetry || []).filter(usableFix);
+  if (fixes.length < 2) return null;
+  let up = vnorm(pathObj.up);
+  let forward = vsub(raw[0].f, [up[0] * vdot(raw[0].f, up), up[1] * vdot(raw[0].f, up), up[2] * vdot(raw[0].f, up)]);
+  if (Math.hypot(...forward) < 1e-8) {
+    forward = vsub([1, 0, 0], [up[0] * up[0], up[1] * up[0], up[2] * up[0]]);
+  }
+  forward = vnorm(forward);
+  const right = vnorm(vcross(forward, up));
+  const fwd = vnorm(vcross(up, right));
+  const origin = raw[0].p;
+  const mpu = pathObj.metresPerUnit;
+  const xyOf = (p) => {
+    const d = vsub(p, origin).map((v) => v * mpu);
+    return [vdot(d, right), vdot(d, fwd)];
+  };
+  const lat0 = +fixes[0].lat, lon0 = +fixes[0].lon;
+  const cos0 = Math.cos(lat0 * Math.PI / 180);
+  const enu = (lat, lon) => [
+    (lon - lon0) * Math.PI / 180 * EARTH_M * cos0,
+    (lat - lat0) * Math.PI / 180 * EARTH_M,
+  ];
+  const src = [], dst = [];
+  for (const s of fixes) { src.push(xyOf(scenePoint(raw, s.t))); dst.push(enu(+s.lat, +s.lon)); }
+  let span = 0;
+  for (let i = 0; i < dst.length; i++) for (let j = i + 1; j < dst.length; j++) {
+    span = Math.max(span, Math.hypot(dst[i][0] - dst[j][0], dst[i][1] - dst[j][1]));
+  }
+  let fit = umeyama2(src, dst, null);
+  // A GPS cloud under 8 m cannot support a scale. Longer tracks keep the fit so the
+  // route sits on the real fixes even when the scene's metres-per-unit is off.
+  if (span < 8) fit = umeyama2(src, dst, 1);
+  const toLL = (xy) => {
+    const east = fit.scale * (fit.R[0][0] * xy[0] + fit.R[0][1] * xy[1]) + fit.t[0];
+    const north = fit.scale * (fit.R[1][0] * xy[0] + fit.R[1][1] * xy[1]) + fit.t[1];
+    return {
+      lat: lat0 + (north / EARTH_M) * 180 / Math.PI,
+      lon: lon0 + (east / (EARTH_M * cos0)) * 180 / Math.PI,
+    };
+  };
+  return {
+    origin: { lat: lat0, lon: lon0 },
+    scale: fit.scale,
+    fixes: fixes.length,
+    frames: raw.map((f) => ({ t: f.t, ...toLL(xyOf(f.p)) })),
+  };
+}
+const slam = path.track?.frames?.length ? path.track : alignSlam(path, tel);
+const track = slam?.frames || [];
+let leafletMap = null, carMark = null, followMap = true, placeName = "";
+function llAt(t) {
+  if (!track.length) return null;
+  if (t <= track[0].t) return track[0];
+  const last = track[track.length - 1];
+  if (t >= last.t) return last;
+  let i = 1;
+  while (i < track.length && track[i].t < t) i++;
+  const a = track[i - 1], b = track[i];
+  const k = b.t === a.t ? 0 : (t - a.t) / (b.t - a.t);
+  return { lat: a.lat + (b.lat - a.lat) * k, lon: a.lon + (b.lon - a.lon) * k, t };
+}
+function pinIcon(deg) {
+  const rot = Number.isFinite(deg) ? deg : 0;
+  return L.divIcon({
+    className: "car-pin",
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+    html: `<div style="width:18px;height:18px;transform:rotate(${rot}deg)"><div style="margin:2px auto 0;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:14px solid #3d7bff;filter:drop-shadow(0 0 1px #fff)"></div></div>`,
+  });
+}
+function setupMap() {
+  const label = $("mapLabel");
+  if (!track.length || typeof L === "undefined") {
+    label.textContent = "no GPS in this clip";
+    $("mapFollow").style.display = "none";
+    return;
+  }
+  leafletMap = L.map("map", { zoomControl: false, attributionControl: true });
+  // CARTO's keyless dark_all tiles are a watermark ("API KEY REQUIRED") as of Nov 2026.
+  // Esri's dark canvas is keyless, sends CORS *, and stops at zoom 16.
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+    attribution: "&copy; Esri, HERE, Garmin, OpenStreetMap",
+    maxZoom: 16,
+    crossOrigin: "anonymous",
+  }).addTo(leafletMap);
+  const line = track.map((p) => [p.lat, p.lon]);
+  const poly = L.polyline(line, { color: "#3d7bff", weight: 4, opacity: 0.9 }).addTo(leafletMap);
+  carMark = L.marker(line[0], { icon: pinIcon(telAt(track[0].t)?.heading), interactive: false }).addTo(leafletMap);
+  carMark._heading = +telAt(track[0].t)?.heading;
+  leafletMap.fitBounds(poly.getBounds().pad(0.35), { animate: false });
+  if (leafletMap.getZoom() > 16) leafletMap.setZoom(16);
+  leafletMap.on("dragstart", () => { followMap = false; $("mapFollow").classList.remove("on"); });
+  $("mapFollow").onclick = () => {
+    followMap = true;
+    $("mapFollow").classList.add("on");
+    const p = llAt(clock);
+    if (p) leafletMap.panTo([p.lat, p.lon], { animate: false });
+  };
+  const o = track[0];
+  placeName = `${o.lat.toFixed(5)}, ${o.lon.toFixed(5)}`;
+  label.textContent = placeName;
+  fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${o.lat}&lon=${o.lon}&zoom=12`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      const a = j?.address;
+      const city = a && (a.city || a.town || a.village || a.hamlet || a.municipality);
+      if (!city) return;
+      placeName = a.state ? `${city}, ${a.state}` : city;
+      label.textContent = placeName;
+    })
+    .catch(() => {});
+}
+function updateMap(t) {
+  if (!leafletMap || !carMark) return;
+  const p = llAt(t);
+  if (!p) return;
+  const ll = [p.lat, p.lon];
+  carMark.setLatLng(ll);
+  const heading = +telAt(t)?.heading;
+  if (Number.isFinite(heading) && Math.abs(heading - (carMark._heading ?? 999)) > 4) {
+    carMark._heading = heading;
+    carMark.setIcon(pinIcon(heading));
+  }
+  if (!followMap) return;
+  const pt = leafletMap.latLngToContainerPoint(ll);
+  const size = leafletMap.getSize();
+  if (size && Math.hypot(pt.x - size.x / 2, pt.y - size.y / 2) > 28) leafletMap.panTo(ll, { animate: false });
+}
+setupMap();
+
+// ---- one-click recording of the whole window (cameras + map + main view) ----
+let rec = null;
+function drawCover(ctx, src, b) {
+  const sw = src.videoWidth || src.width, sh = src.videoHeight || src.height;
+  if (!sw || !sh || b.w < 1 || b.h < 1) return;
+  const s = Math.max(b.w / sw, b.h / sh);
+  const cw = b.w / s, ch = b.h / s;
+  ctx.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, b.x, b.y, b.w, b.h);
+}
+function clipRound(ctx, b, r) {
+  const radius = Math.max(0, Math.min(r, b.w / 2, b.h / 2));
+  ctx.beginPath();
+  ctx.moveTo(b.x + radius, b.y);
+  ctx.arcTo(b.x + b.w, b.y, b.x + b.w, b.y + b.h, radius);
+  ctx.arcTo(b.x + b.w, b.y + b.h, b.x, b.y + b.h, radius);
+  ctx.arcTo(b.x, b.y + b.h, b.x, b.y, radius);
+  ctx.arcTo(b.x, b.y, b.x + b.w, b.y, radius);
+  ctx.closePath();
+  ctx.clip();
+}
+function relBox(el, root, sx, sy) {
+  const a = root.getBoundingClientRect(), b = el.getBoundingClientRect();
+  return { x: (b.left - a.left) * sx, y: (b.top - a.top) * sy, w: b.width * sx, h: b.height * sy };
+}
+function paintRecording() {
+  if (!rec) return;
+  const app = document.querySelector(".app");
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W = Math.round(app.clientWidth * dpr), H = Math.round(app.clientHeight * dpr);
+  const fit = Math.min(1, 2560 / Math.max(W, H, 1));
+  W = Math.max(2, Math.round(W * fit)); H = Math.max(2, Math.round(H * fit));
+  const sx = W / app.clientWidth, sy = H / app.clientHeight;
+  if (rec.canvas.width !== W || rec.canvas.height !== H) { rec.canvas.width = W; rec.canvas.height = H; }
+  const ctx = rec.ctx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#07080a";
+  ctx.fillRect(0, 0, W, H);
+  for (const cam of document.querySelectorAll("#cams .cam")) {
+    const b = relBox(cam, app, sx, sy);
+    ctx.save();
+    clipRound(ctx, b, 6 * sx);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    const v = cam.querySelector("video");
+    if (v && v.readyState >= 2) drawCover(ctx, v, b);
+    ctx.restore();
+    const label = (cam.querySelector("span")?.textContent || "").toUpperCase();
+    if (label) {
+      ctx.font = `${Math.max(10, Math.round(10 * sx))}px ui-monospace, monospace`;
+      const tw = ctx.measureText(label).width + 10 * sx;
+      const x = b.x + 6 * sx, y = b.y + b.h - 20 * sy;
+      ctx.fillStyle = "rgba(0,0,0,.65)";
+      ctx.fillRect(x, y, tw, 16 * sy);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, x + 5 * sx, y + 12 * sy);
+    }
+  }
+  const mapEl = $("map");
+  const mb = relBox(mapEl, app, sx, sy);
+  ctx.save();
+  clipRound(ctx, mb, 8 * sx);
+  ctx.fillStyle = "#101216";
+  ctx.fillRect(mb.x, mb.y, mb.w, mb.h);
+  const mapRect = mapEl.getBoundingClientRect();
+  if (mapRect.width > 0) {
+    const tx = mb.w / mapRect.width, ty = mb.h / mapRect.height;
+    for (const img of mapEl.querySelectorAll("img.leaflet-tile")) {
+      if (!img.complete || !img.naturalWidth) continue;
+      const r = img.getBoundingClientRect();
+      try {
+        ctx.drawImage(img, mb.x + (r.left - mapRect.left) * tx, mb.y + (r.top - mapRect.top) * ty, r.width * tx, r.height * ty);
+      } catch { /* a tile without CORS is skipped; the route is still drawn */ }
+    }
+  }
+  if (leafletMap && track.length && mapRect.width > 0) {
+    ctx.beginPath();
+    track.forEach((p, i) => {
+      const pt = leafletMap.latLngToContainerPoint([p.lat, p.lon]);
+      const x = mb.x + pt.x * (mb.w / mapRect.width), y = mb.y + pt.y * (mb.h / mapRect.height);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = "#3d7bff";
+    ctx.lineWidth = Math.max(2, 4 * sx);
+    ctx.stroke();
+    const cur = llAt(clock);
+    if (cur && mapRect.width > 0) {
+      const pt = leafletMap.latLngToContainerPoint([cur.lat, cur.lon]);
+      ctx.fillStyle = "#3d7bff";
+      ctx.beginPath();
+      ctx.arc(mb.x + pt.x * (mb.w / mapRect.width), mb.y + pt.y * (mb.h / mapRect.height), 6 * sx, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+  ctx.font = `${Math.max(11, Math.round(11 * sx))}px ui-monospace, monospace`;
+  ctx.fillStyle = "#e8eaee";
+  ctx.fillText($("mapLabel").textContent || "", mb.x + 8 * sx, mb.y + 18 * sy);
+  const sb = relBox(stage, app, sx, sy);
+  ctx.save();
+  clipRound(ctx, sb, 10 * sx);
+  ctx.drawImage(renderer.domElement, sb.x, sb.y, sb.w, sb.h);
+  ctx.fillStyle = "#e8eaee";
+  ctx.font = `${Math.round(48 * Math.min(sx, sy))}px -apple-system, system-ui, sans-serif`;
+  ctx.fillText($("speed").textContent, sb.x + 18 * sx, sb.y + 64 * sy);
+  ctx.font = `${Math.max(11, Math.round(11 * sx))}px ui-monospace, monospace`;
+  ctx.fillStyle = "#8a909c";
+  ctx.fillText("MPH", sb.x + 18 * sx, sb.y + 80 * sy);
+  ctx.fillStyle = "#8a909c";
+  ctx.textAlign = "right";
+  const meta = ($("meta").innerText || "").split("\n").slice(0, 3);
+  meta.forEach((line, i) => ctx.fillText(line, sb.x + sb.w - 18 * sx, sb.y + 28 * sy + i * 16 * sy));
+  ctx.textAlign = "left";
+  ctx.restore();
+}
+function startRecording() {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: false });
+  const stream = canvas.captureStream(30);
+  const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+    ? "video/webm;codecs=vp9"
+    : (MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" : "video/webm");
+  const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: mime });
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const clip = String(path.clip || path.timestamp || "replay").replace(/[^\w.-]+/g, "_");
+    a.href = URL.createObjectURL(blob);
+    a.download = `otrv-${clip}-${mode}-${stamp}.webm`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    stream.getTracks().forEach((t) => t.stop());
+  };
+  recorder.start(1000);
+  rec = { canvas, ctx, recorder, started: performance.now() };
+  $("record").classList.add("on", "rec");
+  $("record").textContent = "stop";
+}
+function stopRecording() {
+  if (!rec) return;
+  const done = rec;
+  rec = null;
+  $("record").classList.remove("on", "rec");
+  $("record").textContent = "record";
+  if (done.recorder.state !== "inactive") done.recorder.stop();
+}
+$("record").onclick = () => { try { rec ? stopRecording() : startRecording(); } catch (err) { console.error(err); stopRecording(); } };
+
 const basis = new THREE.Matrix4();
 renderer.setAnimationLoop((now) => {
   const dt = Math.max(0, Math.min(0.1, (now - last) / 1000));
@@ -331,12 +833,14 @@ renderer.setAnimationLoop((now) => {
   car.visible = mode !== "driver";
   updateRibbon(clock);
 
-  if (mode === "chase" || mode === "driver") {
-    const want = mode === "chase"
-      ? road.clone().addScaledVector(f, -9 * M).addScaledVector(UP, 4.2 * M)
+  if (mode === "drone" || mode === "driver") {
+    const want = mode === "drone"
+      ? road.clone().addScaledVector(f, -DRONE_BACK * M).addScaledVector(UP, DRONE_UP * M)
       : p.clone().addScaledVector(f, 0.2 * M);
-    const look = mode === "chase" ? road.clone().addScaledVector(f, 14 * M).addScaledVector(UP, 1 * M) : p.clone().add(f);
-    const k = first ? 1 : 1 - Math.pow(0.002, dt);
+    const look = mode === "drone"
+      ? road.clone().addScaledVector(f, DRONE_AHEAD * M).addScaledVector(UP, DRONE_LOOK_H * M)
+      : p.clone().add(f);
+    const k = first || mode === "driver" ? 1 : 1 - Math.exp(-dt / 0.28);
     smoothPos.lerp(want, k); smoothLook.lerp(look, k); first = false;
     camera.position.copy(smoothPos);
     camera.lookAt(smoothLook);
@@ -344,7 +848,13 @@ renderer.setAnimationLoop((now) => {
     controls.update();
   }
   hud(clock);
+  updateMap(clock);
   renderer.render(scene, camera);
+  if (rec) {
+    paintRecording();
+    const sec = Math.round((performance.now() - rec.started) / 1000);
+    $("record").textContent = `stop ${fmt(sec)}`;
+  }
 });
 </script>
 </body>

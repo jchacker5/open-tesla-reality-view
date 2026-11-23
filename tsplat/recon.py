@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from . import brush
+from .geo import align_track
 
 
 def sh(*args: str) -> None:
@@ -324,28 +325,29 @@ def export_path(work: Path, dense: Path) -> Path:
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
     scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
+    payload = {
+        "up": up.round(5).tolist(),
+        "metresPerUnit": scale,
+        "frames": path,
+        "dur": meta["dur"],
+        "cams": meta["cams"],
+        "clip": meta["clip"],
+        "timestamp": meta.get("timestamp"),
+    }
+    track = align_track(path, payload["up"], scale, tel)
+    if track is not None:
+        payload["track"] = track
     out = work / "viewer" / "path.json"
-    out.write_text(
-        json.dumps(
-            {
-                "up": up.round(5).tolist(),
-                "metresPerUnit": scale,
-                "frames": path,
-                "dur": meta["dur"],
-                "cams": meta["cams"],
-                "clip": meta["clip"],
-                "timestamp": meta.get("timestamp"),
-            }
-        )
-    )
+    out.write_text(json.dumps(payload))
     print(f"path: {len(path)} poses, {scale:.3f} m/unit -> {out}")
     return out
 
 
-def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float = 4.2, ahead_m: float = 14.0) -> Path:
-    """Package posed reference frames + the chase-camera trajectory for a novel-view-synthesis model
-    (e.g. ViewNeXt once its weights are public). Generic format: OpenCV camera convention
-    (x right, y down, z forward), 4x4 camera-to-world matrices, pinhole intrinsics in pixels."""
+def export_nvs(work: Path, fps: float = 10.0, back_m: float = 11.0, up_m: float = 8.0, ahead_m: float = 2.5) -> Path:
+    """Package posed reference frames + the Reality View drone trajectory for a novel-view-synthesis model
+    (e.g. ViewNeXt once its weights are public). Same rig as the viewer: 11 m back, 8 m up, look 2.5 m
+    ahead. Generic format: OpenCV camera convention (x right, y down, z forward), 4x4 camera-to-world
+    matrices, pinhole intrinsics in pixels."""
     dense = work / "dense"
     path = json.loads((work / "viewer" / "path.json").read_text())
     up = np.array(path["up"])
@@ -392,7 +394,7 @@ def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float =
         f /= np.linalg.norm(f)
         road = p - up * 1.4 * u
         eye = road - f * back_m * u + up * up_m * u
-        z = road + f * ahead_m * u + up * 1.0 * u - eye
+        z = road + f * ahead_m * u + up * 0.8 * u - eye
         z /= np.linalg.norm(z)
         x = np.cross(-up, z)  # OpenCV: x = y × z with y ≈ down = -up
         x /= np.linalg.norm(x)
@@ -400,7 +402,7 @@ def export_nvs(work: Path, fps: float = 10.0, back_m: float = 9.0, up_m: float =
         c2w = np.eye(4)
         c2w[:3, 0], c2w[:3, 1], c2w[:3, 2], c2w[:3, 3] = x, y, z, eye
         traj.append({"t": round(float(t), 3), "c2w": c2w.round(6).tolist()})
-    W, H, vfov = 960, 540, np.radians(55)  # same framing as the web viewer's chase cam
+    W, H, vfov = 960, 540, np.radians(48)  # same framing as the web viewer's drone cam
     fy = H / 2 / np.tan(vfov / 2)
     target_k = {"w": W, "h": H, "fx": fy, "fy": fy, "cx": W / 2, "cy": H / 2}
     out = work / "nvs"

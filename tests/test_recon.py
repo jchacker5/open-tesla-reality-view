@@ -59,7 +59,7 @@ def test_export_path_and_nvs(tmp_path):
         c2w = np.array(fr["c2w"])
         R = c2w[:3, :3]
         assert np.allclose(R.T @ R, np.eye(3), atol=1e-5)
-        assert R[2, 2] > 0.8  # chase cam looks forward (+z)
+        assert R[2, 2] > 0.8  # drone cam still looks forward (+z)
         assert R[:, 1] @ np.array(path["up"]) < 0  # OpenCV y points down
 
 

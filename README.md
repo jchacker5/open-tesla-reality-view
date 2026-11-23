@@ -5,7 +5,7 @@
 **Your Tesla's dashcam footage, rebuilt as a 3D world you can fly through.**
 
 Pull the USB drive from your glovebox, run `ingest`, `prep`, `recon` and `view`, and replay your drive as a
-[3D Gaussian splat](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/): a chase cam behind
+[3D Gaussian splat](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/): a high rear drone view behind
 your car, every camera feed beside it, and speed, steering and Autopilot state from the telemetry
 Tesla saves in each clip. Runs locally on an Apple-silicon Mac. No cloud, no account, your footage
 never leaves your machine.
@@ -33,13 +33,13 @@ never leaves your machine.
   people can be masked with YOLO segmentation so they don't leave smears.
 - **Gaussian splat training on your Mac's GPU** with [Brush](https://github.com/ArthurBrussee/brush)
   (Metal).
-- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): chase, driver and free-fly cameras,
+- **Replay viewer** ([Spark](https://sparkjs.dev) + three.js): drone, driver and free-fly cameras,
   the raw camera feeds synced on the side, and a telemetry HUD.
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
   signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
 - **Ready for generative view synthesis.** `otrv nvs-export` packages posed frames and the
-  chase-cam path for diffusion novel-view models such as
+  drone-cam path for diffusion novel-view models such as
   [ViewNeXt](https://phai-lab.github.io/ViewNext/).
 
 ## Quick start

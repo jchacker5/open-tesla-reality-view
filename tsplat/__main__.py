@@ -9,6 +9,7 @@ otrv egomask                               optional, once: mask your car's body 
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
 otrv view drive1                           open the replay viewer
+otrv car fetch <sketchfab-id>              optional: your own car model (stays local)
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, doctor, ingest, prep, recon, serve, speed
+from . import bench, brush, car, doctor, ingest, prep, recon, serve, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -165,6 +166,15 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("name", help="run name")
     a.add_argument("--fps", type=float, default=10, help="chase-cam target poses per second")
 
+    a = cmd("car", "use your own car model in the viewer (downloaded with your Sketchfab token; stays local)")
+    car_sub = a.add_subparsers(dest="car_cmd", required=True, metavar="<action>")
+    f = car_sub.add_parser("fetch", help="download a Sketchfab model by id and install it", formatter_class=Fmt)
+    f.add_argument("uid", help="Sketchfab model id (the 32-hex tail of the model URL)")
+    f.add_argument("--allow-nc", action="store_true", help="allow non-commercial (CC BY-NC) licences")
+    f.add_argument("--paint", default="#f2f3f5", help="repaint body panels this colour ('none' keeps the model's)")
+    car_sub.add_parser("clear", help="remove the installed model (back to the built-in car)", formatter_class=Fmt)
+    car_sub.add_parser("show", help="print the installed model and its credits", formatter_class=Fmt)
+
     a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
     a.add_argument("name", help="run name")
     a.add_argument("--port", type=int, default=8765, help="local port")
@@ -274,9 +284,21 @@ def cmd_recon(args) -> None:
     print(f"done: `otrv view {args.name}` to replay it, `otrv bench {args.name}` to score it")
 
 
+def cmd_car(args) -> None:
+    dest = car.models_dir()
+    if args.car_cmd == "fetch":
+        car.fetch(args.uid, dest, None, args.allow_nc, None if args.paint == "none" else args.paint)
+    elif args.car_cmd == "clear":
+        car.clear(dest)
+    else:
+        cfg = dest / "car.json"
+        print(cfg.read_text() if cfg.exists() else "built-in car (no model installed)")
+
+
 def cmd_view(args) -> None:
     vd = need_recon(args.name, "viewer/scene.ply", "viewer/path.json") / "viewer"
     (vd / "index.html").write_bytes(viewer_html().read_bytes())
+    car.sync_into(vd)
     try:
         srv = serve.make_server(vd, args.port)
     except OSError as e:
@@ -311,6 +333,8 @@ def dispatch(args) -> None:
         ingest.run(args.src, args.data, args.index_only, args.kinds, args.since)
     elif c == "list":
         cmd_list(args)
+    elif c == "car":
+        cmd_car(args)
     elif c == "suggest":
         cmd_suggest(args)
     elif c == "egomask":

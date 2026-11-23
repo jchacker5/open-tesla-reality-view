@@ -111,32 +111,9 @@ def undistort(work: Path, model: Path) -> Path:
         "--output_type",
         "COLMAP",
     )
-    stage, tmp = work / "_maskimgs", work / "_maskdense"
-    for d in (stage, tmp):
-        shutil.rmtree(d, ignore_errors=True)
-    for m in (work / "masks").rglob("*.jpg.png"):
-        out = stage / m.parent.name / m.name[:-4]
-        out.parent.mkdir(parents=True, exist_ok=True)
-        Image.open(m).convert("RGB").save(out, quality=100)
-    sh(
-        "colmap",
-        "image_undistorter",
-        "--image_path",
-        str(stage),
-        "--input_path",
-        str(model),
-        "--output_path",
-        str(tmp),
-        "--output_type",
-        "COLMAP",
-    )
-    md = dense / "images" / "masks"
-    md.mkdir(parents=True, exist_ok=True)
-    for f in (tmp / "images").rglob("*.jpg"):
-        a = np.asarray(Image.open(f).convert("L"))
-        Image.fromarray(np.where(a > 127, 255, 0).astype(np.uint8)).save(md / f"{f.parent.name}_{f.stem}.png")
-    shutil.rmtree(stage)
-    shutil.rmtree(tmp)
+    _undistort_masks(work, model, work / "masks", dense / "images" / "masks")
+    if (work / "sky").is_dir():  # bench scores without sky; `recon --sky` decides how Brush sees it
+        _undistort_masks(work, model, work / "sky", dense / "sky")
 
     for f in list((dense / "images").glob("*/*.jpg")):
         if f.parent.name != "masks":
@@ -162,6 +139,55 @@ def undistort(work: Path, model: Path) -> Path:
     return dense
 
 
+def snapshot_dense(work: Path) -> None:
+    """Keep the pristine undistorted dataset in dense_base/ so the training-time levers (sky, colour
+    normalisation, dense init), which edit dense/ in place, start from it on every `recon --skip-sfm`."""
+    base = work / "dense_base"
+    shutil.rmtree(base, ignore_errors=True)
+    shutil.copytree(work / "dense", base, ignore=shutil.ignore_patterns("stereo", "*.sh"))
+
+
+def restore_dense(work: Path) -> Path:
+    """dense/ as undistort left it (from dense_base/; a pre-v2 dense/ is pristine and becomes the base)."""
+    dense, base = work / "dense", work / "dense_base"
+    if not base.is_dir():
+        snapshot_dense(work)
+    else:
+        shutil.rmtree(dense, ignore_errors=True)
+        shutil.copytree(base, dense)
+    return dense
+
+
+def _undistort_masks(work: Path, model: Path, src: Path, dest: Path) -> None:
+    """Undistort per-frame masks (<src>/<cam>/<frame>.jpg.png) with the images' cameras, by running
+    them through image_undistorter as images; binarised to dest/<cam>_<frame>.png."""
+    stage, tmp = work / "_maskimgs", work / "_maskdense"
+    for d in (stage, tmp):
+        shutil.rmtree(d, ignore_errors=True)
+    for m in src.rglob("*.jpg.png"):
+        out = stage / m.parent.name / m.name[:-4]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        Image.open(m).convert("RGB").save(out, quality=100)
+    sh(
+        "colmap",
+        "image_undistorter",
+        "--image_path",
+        str(stage),
+        "--input_path",
+        str(model),
+        "--output_path",
+        str(tmp),
+        "--output_type",
+        "COLMAP",
+    )
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in (tmp / "images").rglob("*.jpg"):
+        a = np.asarray(Image.open(f).convert("L"))
+        Image.fromarray(np.where(a > 127, 255, 0).astype(np.uint8)).save(dest / f"{f.parent.name}_{f.stem}.png")
+    shutil.rmtree(stage)
+    shutil.rmtree(tmp)
+
+
 def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
     """Brush 0.3 fails ("early eof") on very small images. Heavy undistortion can shrink a
     camera's frames, so upscale those cameras (images, masks, intrinsics) to a safe size."""
@@ -184,9 +210,9 @@ def _ensure_min_size(dense: Path, min_side: int = 360) -> None:
         for name in names.get(p[0], []):
             img = dense / "images" / name
             Image.open(img).resize((w, h), Image.LANCZOS).save(img, quality=95)
-            m = dense / "images" / "masks" / f"{Path(name).stem}.png"
-            if m.exists():
-                Image.open(m).resize((w, h), Image.NEAREST).save(m)
+            for m in (dense / "images" / "masks" / f"{Path(name).stem}.png", dense / "sky" / f"{Path(name).stem}.png"):
+                if m.exists():
+                    Image.open(m).resize((w, h), Image.NEAREST).save(m)
         print(f"camera {p[0]}: upscaled x{s} for Brush (small undistorted frames)")
     sp.write_text("\n".join(out) + "\n")
 
@@ -355,19 +381,20 @@ def export_path(work: Path, dense: Path) -> Path:
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
     scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
     out = work / "viewer" / "path.json"
-    out.write_text(
-        json.dumps(
-            {
-                "up": up.round(5).tolist(),
-                "metresPerUnit": scale,
-                "frames": path,
-                "dur": meta["dur"],
-                "cams": meta["cams"],
-                "clip": meta["clip"],
-                "timestamp": meta.get("timestamp"),
-            }
-        )
-    )
+    doc = {
+        "up": up.round(5).tolist(),
+        "metresPerUnit": scale,
+        "frames": path,
+        "dur": meta["dur"],
+        "cams": meta["cams"],
+        "clip": meta["clip"],
+        "timestamp": meta.get("timestamp"),
+    }
+    sky_json = work / "sky.json"
+    colours = json.loads(sky_json.read_text()).get("colours") if sky_json.exists() else None
+    if colours:  # mean real sky colour, sRGB 0-1: the viewer's background gradient
+        doc["sky"] = {"top": colours["top"], "horizon": colours["horizon"]}
+    out.write_text(json.dumps(doc))
     print(f"path: {len(path)} poses, {scale:.3f} m/unit -> {out}")
     return out
 

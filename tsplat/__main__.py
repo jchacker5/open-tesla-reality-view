@@ -24,7 +24,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, doctor, ingest, prep, recon, serve, speed
+from . import bench, brush, doctor, ingest, prep, recon, serve, sky, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -134,6 +134,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="mask cars/people with YOLO (needs `uv sync --extra movers`: ~1 GB torch download; ~0.2 s per frame)",
     )
+    a.add_argument(
+        "--sky-model",
+        action="store_true",
+        help="segment the sky with UperNet/ADE20K instead of the brightness heuristic "
+        "(needs `uv sync --extra quality`; ~0.7 s per frame on an M4)",
+    )
 
     a = cmd(
         "recon",
@@ -162,6 +168,13 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="after training, drop splats inside the car's swept path and giant faint ones (counts in prune.json)",
+    )
+    a.add_argument(
+        "--sky",
+        choices=sky.MODES,
+        default="alpha",
+        help="alpha: sky transparent in training (ignored in images that also need an ego/mover mask); "
+        "ignore: sky masked out; off: trained like the rest",
     )
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
@@ -267,8 +280,14 @@ def cmd_recon(args) -> None:
         timings["sfm"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         dense = recon.undistort(work, model)
+        recon.snapshot_dense(work)
         timings["undistort"] = time.perf_counter() - t0
+    else:
+        dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
+    t0 = time.perf_counter()
+    sky.apply(dense, args.sky)
+    timings["levers"] = time.perf_counter() - t0
     t0 = time.perf_counter()
     recon.train(work, dense, args.steps, args.live, 8 if args.eval else 0, ["--seed", str(args.seed)], args.prune)
     timings["train"] = time.perf_counter() - t0
@@ -282,6 +301,7 @@ def cmd_recon(args) -> None:
                 "eval": args.eval,
                 "seed": args.seed,
                 "prune": args.prune,
+                "sky": args.sky,
             }
         )
     )
@@ -334,7 +354,17 @@ def dispatch(args) -> None:
     elif c == "prep":
         idx = need_index(args.data)
         doctor.preflight("prep")
-        prep.run(str(idx), args.clip, args.name, args.start, args.dur, args.fps, args.width, args.mask_movers)
+        prep.run(
+            str(idx),
+            args.clip,
+            args.name,
+            args.start,
+            args.dur,
+            args.fps,
+            args.width,
+            args.mask_movers,
+            sky_model=args.sky_model,
+        )
     elif c == "recon":
         cmd_recon(args)
     elif c == "bench":

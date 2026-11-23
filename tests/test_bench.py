@@ -170,8 +170,8 @@ def test_floaters_card_and_seed_in_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(bench, "environment", lambda: {})
     work = tmp_path / "run"
     (work / "images" / "front").mkdir(parents=True)
-    (work / "meta.json").write_text(json.dumps({"clip": "c", "fps": 6, "sky": "alpha", "cams": ["front"]}))
-    (work / "recon_args.json").write_text(json.dumps({"steps": 100, "seed": 7, "prune": True}))
+    (work / "meta.json").write_text(json.dumps({"clip": "c", "fps": 6, "sky_model": False, "cams": ["front"]}))
+    (work / "recon_args.json").write_text(json.dumps({"steps": 100, "seed": 7, "prune": True, "sky": "alpha"}))
     write_path(work / "viewer" / "path.json")
     raw = make_ply([[0, -1.0, 2], [0, -1.0, 3], [8, -1.0, 3]])
     (work / "splat").mkdir()

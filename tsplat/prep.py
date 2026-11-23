@@ -3,6 +3,7 @@
 work/<name>/
   images/<cam>/00000.jpg          frames sampled at --fps from every camera
   masks/<cam>/00000.jpg.png  COLMAP masks (black = ignore): ego-car body (+ movers if requested)
+  sky/<cam>/00000.jpg.png    sky masks (white = sky; see sky.py), sky.json: sky colours for the viewer
   rig_config.json            approximate Tesla camera layout, refined by COLMAP bundle adjustment
   pairs.txt                  rig-aware match list (same cam over time + overlapping neighbours)
   viewer/cams/<cam>.mp4      trimmed, downscaled clips for the side panel
@@ -23,7 +24,7 @@ import numpy as np
 from PIL import Image
 from scipy.ndimage import binary_closing, binary_opening, median_filter
 
-from . import sei
+from . import sei, sky
 from .ingest import CAMS
 
 # Which cameras can see the same scene (spatially, allowing for car motion over time).
@@ -376,9 +377,23 @@ def ego_mask_summary(egodir: Path, cams: list[str]) -> str:
 
 # Everything prep and the steps after it write. Re-prepping a name invalidates all of it: a new window
 # with an old dense/ or splat would let `otrv bench` score (and `otrv view` show) the previous run.
-STALE_DIRS = ("images", "masks", "viewer/cams", "sparse", "dense", "splat", "nvs", "_maskimgs", "_maskdense")
+STALE_DIRS = (
+    "images",
+    "masks",
+    "sky",
+    "viewer/cams",
+    "sparse",
+    "dense",
+    "dense_base",
+    "splat",
+    "nvs",
+    "_maskimgs",
+    "_maskdense",
+)
 STALE_FILES = (
     "colmap.db",
+    "sky.json",
+    "viewer/collision.json",
     "recon_args.json",
     "timings.json",
     "metrics.json",
@@ -409,6 +424,7 @@ def run(
     width: int,
     movers: bool,
     workdir: str = "work",
+    sky_model: bool = False,
 ) -> Path:
     clips = json.loads(Path(index).read_text())
     clip = next((c for c in clips if c["id"] == clip_id or c["timestamp"] == clip_id), None)
@@ -417,6 +433,8 @@ def run(
     check_window(clip, start, dur)
     if movers and importlib.util.find_spec("ultralytics") is None:  # fail before any (slow) extraction
         raise SystemExit("--mask-movers needs ultralytics: run `uv sync --extra movers` (~1 GB PyTorch download)")
+    if sky_model and importlib.util.find_spec("transformers") is None:
+        raise SystemExit("--sky-model needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
     cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
@@ -431,6 +449,7 @@ def run(
     egodir = Path(index).parent / "egomask"
     print(ego_mask_summary(egodir, list(cams)))
     write_masks(out, list(cams), movers, egodir)
+    sky.write(out, list(cams), sky_model)
     print(f"pairs: {write_pairs(out, list(cams))}")
     write_rig_config(out, list(cams))
     write_viewer_assets(cams, out, start, actual_dur)
@@ -445,6 +464,8 @@ def run(
                 "fps": fps,
                 "frames": counts,
                 "cams": list(cams),
+                "width": width,
+                "sky_model": sky_model,
             },
             indent=1,
         )

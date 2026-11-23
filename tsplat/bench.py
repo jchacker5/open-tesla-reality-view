@@ -33,7 +33,7 @@ GATES = {
     "max_reproj_px": 1.5,
 }
 # prep settings (meta.json) copied into each ledger line's config, next to recon_args.json
-PREP_CONFIG = ("clip", "start", "dur", "fps", "width", "sky", "sky_model")
+PREP_CONFIG = ("clip", "start", "dur", "fps", "width", "sky_model")
 
 
 def _image_names(dense: Path) -> list[str]:

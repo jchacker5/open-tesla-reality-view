@@ -1,4 +1,6 @@
 import json
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -72,3 +74,88 @@ def test_build_index_ignores_appledouble_files(tmp_path, monkeypatch):
     clips = ingest.build_index(tmp_path)
     assert len(clips) == 1
     assert clips[0]["cams"]["front"].endswith("/2026-01-02_03-04-05-front.mp4")
+
+
+def test_index_stores_absolute_paths(teslacam, monkeypatch):
+    monkeypatch.chdir(teslacam.parent)
+    clips = ingest.build_index(Path(teslacam.name))  # relative root
+    for c in clips:
+        for p in c["cams"].values():
+            assert Path(p).is_absolute() and Path(p).exists()
+
+
+def test_select_files_kinds_and_since(teslacam):
+    rel = {str(p) for p in ingest.select_files(teslacam)}  # default: RecentClips + SavedClips
+    assert "RecentClips/2026-01-02_03-04-05-front.mp4" in rel
+    assert "SavedClips/2026-01-01_10-00-00/event.json" in rel
+    assert not any(p.startswith("SentryClips") for p in rel)
+    assert "RecentClips/notes.mp4" not in rel
+
+    sentry = {str(p) for p in ingest.select_files(teslacam, ("SentryClips",))}
+    assert sentry == {
+        "SentryClips/2026-01-03_00-00-00/2026-01-03_00-00-00-front.mp4",
+        "SentryClips/2026-01-03_00-00-00/event.json",
+    }
+
+    since = {str(p) for p in ingest.select_files(teslacam, ingest.KINDS, ingest.parse_since("2026-01-02"))}
+    assert not any("2026-01-01" in p for p in since)  # the SavedClips event is from Jan 1
+    assert any(p.startswith("SentryClips") for p in since)
+    with pytest.raises(SystemExit, match="YYYY-MM-DD"):
+        ingest.parse_since("01/02/2026")
+
+
+def test_select_files_takes_plain_folder_whole(tmp_path):
+    (tmp_path / "2026-01-02_03-04-05-front.mp4").write_bytes(b"")
+    (tmp_path / "._2026-01-02_03-04-05-front.mp4").write_bytes(b"")
+    assert [str(p) for p in ingest.select_files(tmp_path)] == ["2026-01-02_03-04-05-front.mp4"]
+
+
+def test_ingest_aborts_when_it_will_not_fit(teslacam, tmp_path, monkeypatch):
+    (teslacam / "RecentClips" / "2026-01-02_03-04-05-front.mp4").write_bytes(b"x" * 1000)
+    monkeypatch.setattr(ingest, "free_bytes", lambda p: ingest.HEADROOM + 500)
+    copied = []
+    monkeypatch.setattr(ingest, "copy", lambda *a: copied.append(a))
+    with pytest.raises(SystemExit, match="not enough space"):
+        ingest.run(str(teslacam), str(tmp_path / "dest"))
+    assert not copied
+
+
+def test_bytes_to_copy_skips_files_already_copied(teslacam, tmp_path):
+    f = teslacam / "RecentClips" / "2026-01-02_03-04-05-front.mp4"
+    f.write_bytes(b"x" * 100)
+    dest = tmp_path / "dest"
+    (dest / "RecentClips").mkdir(parents=True)
+    (dest / "RecentClips" / f.name).write_bytes(b"x" * 100)
+    total, new = ingest.bytes_to_copy(teslacam, dest, [f.relative_to(teslacam)])
+    assert (total, new) == (100, 0)
+
+
+@pytest.mark.parametrize(
+    ("version", "flag"),
+    [
+        ("openrsync: protocol version 29\nrsync version 2.6.9 compatible", "--progress"),
+        ("rsync  version 2.6.9  protocol version 29", "--progress"),
+        ("rsync  version 3.2.7  protocol version 31", "--info=progress2"),
+        ("rsync  version 3.1.0  protocol version 31", "--info=progress2"),
+        ("", "--progress"),
+    ],
+)
+def test_rsync_progress_flag(version, flag):
+    assert ingest.rsync_progress_flag(version) == flag
+
+
+@pytest.mark.skipif(not shutil.which("rsync"), reason="needs rsync")
+def test_copy_with_rsync_copies_only_selected(teslacam, tmp_path):
+    dest = tmp_path / "dest"
+    files = ingest.select_files(teslacam)
+    ingest.copy(teslacam, dest, files)
+    copied = {str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file()}
+    assert copied == {str(f) for f in files}
+
+
+def test_copy_without_rsync(teslacam, tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest.shutil, "which", lambda name: None)
+    dest = tmp_path / "dest"
+    files = ingest.select_files(teslacam)
+    ingest.copy(teslacam, dest, files)
+    assert {str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file()} == {str(f) for f in files}

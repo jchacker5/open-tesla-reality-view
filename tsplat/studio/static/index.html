@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="otrv-token" content="{{TOKEN}}">
+<meta name="color-scheme" content="dark">
+<title>OTRV Studio</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script type="module" src="/static/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/sources" aria-label="OTRV Studio home">
+    <img src="/static/icon.svg" alt="" width="26" height="26">
+    <span class="brand-name">Open Tesla Reality View</span>
+    <span class="brand-tag">Studio</span>
+  </a>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#/sources" data-nav="sources">Sources</a>
+    <a href="#/drives" data-nav="drives">Drives</a>
+    <a href="#/build" data-nav="build">Build <span class="tab-badge" id="buildBadge" hidden></span></a>
+    <a href="#/gallery" data-nav="gallery">Gallery</a>
+  </nav>
+  <div class="local-pill" title="The studio only listens on 127.0.0.1 and makes no external requests">
+    <span class="dot"></span>Local only
+  </div>
+</header>
+<main id="view" class="view" tabindex="-1"></main>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

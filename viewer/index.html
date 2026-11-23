@@ -79,6 +79,8 @@
   .app.noui .side, .app.noui .hud, .app.noui .meta, .app.noui .bar, .app.noui .toast, .app.noui .credit { display: none; }
   .credit { position: absolute; left: 12px; bottom: 10px; max-width: max(200px, calc((100% - 770px) / 2)); font: 10px/1.35 var(--mono); color: var(--text);
     opacity: .6; pointer-events: none; z-index: 2; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+  .credit a { color: inherit; text-decoration: none; pointer-events: auto; }
+  .credit a[href]:hover { text-decoration: underline; }
   .app.noui { padding: 0; }
   .app.noui .view { border-radius: 0; }
   .app.render .vignette, .app.render .loading { display: none; }
@@ -112,15 +114,37 @@
   .errCard h2 { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
   .errCard p { margin: 0; color: #b9bec8; line-height: 1.6; }
   .errCard code { font: 12px var(--mono); background: #1a1d23; padding: 1px 5px; border-radius: 4px; color: var(--text); }
+  .btns { flex-wrap: wrap; }
   @media (max-width: 820px) {
     body { overflow: auto; }
-    .app { grid-template-columns: 1fr; grid-template-rows: 60vh auto; height: auto; padding: 16px; }
-    .stage { order: -1; height: 60vh; }
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto; height: auto; padding: 10px; }
+    .stage { order: -1; height: auto; }
+    .view { height: 62vh; min-height: 300px; flex: none; }
+    .app.noui .view { height: 100vh; }
+    /* transport bar moves out of the picture, under the canvas */
+    .bar { position: static; transform: none; width: 100%; margin-top: 8px; backdrop-filter: none; }
     .speed { font-size: 44px; }
+    .hud { top: 12px; left: 12px; }
+    .meta { top: 12px; right: 12px; }
+    .minimap { width: 112px; height: 112px; right: 12px; bottom: 36px; }
+    .mapAttr { right: 12px; bottom: 12px; max-width: 160px; }
+    .tDrive { bottom: 14px; padding: 0 12px; }
+    .tDrive .tStick { width: 104px; height: 104px; }
+    .tBtns button { width: 56px; height: 56px; }
+    .app.drive .minimap { bottom: auto; top: 112px; }
+    .app.drive .mapAttr { bottom: auto; top: 228px; }
+    .credit { bottom: 6px; left: 8px; max-width: 58%; font-size: 9px; }
+    .app.drive .credit, .app.drive .meta { display: none; }
+    .toast { max-width: 70%; text-align: center; }
   }
   @media (max-width: 560px) {
-    .bar { grid-template-columns: auto auto; justify-content: space-between; row-gap: 8px; bottom: 12px; padding: 8px 10px; }
+    .bar { grid-template-columns: auto 1fr; row-gap: 8px; padding: 8px 10px; }
     .bar > div:nth-child(2) { grid-column: 1 / -1; order: -1; }
+    .bar > div:nth-child(3) { justify-content: flex-end; }
+    .bar button { height: 34px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; animation: none !important; }
   }
 </style>
 </head>
@@ -148,7 +172,7 @@
               <div class="gears" id="gears" aria-label="Gear"><span>P</span><span>R</span><span>N</span><span>D</span></div>
             </div>
           </div>
-          <button class="unit" id="unit" title="Toggle mph / km/h" hidden>MPH</button>
+          <button class="unit" id="unit" title="Toggle mph / km/h" aria-label="Speed unit: mph (switch to km/h)" hidden>MPH</button>
           <div class="hudRow" id="hudRow" hidden>
             <svg class="sig" id="sigL" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 4 2 12l8 8v-5h12V9H10z"/></svg>
             <svg class="wheel" id="wheel" viewBox="0 0 32 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2.6">
@@ -173,23 +197,23 @@
     </div>
     <div class="bar" id="bar">
       <div class="btns">
-        <button id="play" title="Play / pause (space)" aria-label="Play">▶</button>
-        <button id="rate" title="Playback speed">1×</button>
+        <button id="play" title="Play / pause (Space)" aria-label="Play">▶</button>
+        <button id="rate" title="Playback speed" aria-label="Playback speed 1×">1×</button>
       </div>
       <div>
         <div class="scrubWrap"><div class="apSpans" id="apSpans"></div>
-          <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Timeline"></div>
+          <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Timeline" aria-valuetext="0:00 of 0:00"></div>
         <div class="time"><span id="tcur">0:00</span> / <span id="tdur">0:00</span></div>
       </div>
       <div class="btns">
-        <button id="mChase" class="on" title="Chase camera">chase</button>
-        <button id="mDriver" title="Driver view">driver</button>
-        <button id="mFree" title="Free orbit">free</button>
-        <button id="mDrone" title="Drone: high behind the car, over the street map (5)">drone</button>
-        <button id="mDrive" class="primary" title="Drive the car yourself (4 / gamepad Start)">DRIVE</button>
-        <button id="share" title="Copy a link to this moment">link</button>
-        <button id="record" title="Record the 3D view to a .webm file">rec</button>
-        <button id="mute" title="Mute (M)" aria-pressed="false">🔇</button>
+        <button id="mChase" class="on" title="Chase camera (1)" aria-label="Chase camera" aria-pressed="true">chase</button>
+        <button id="mDriver" title="Driver view (2)" aria-label="Driver view" aria-pressed="false">driver</button>
+        <button id="mFree" title="Free orbit: drag to orbit, right-drag or Shift-drag to pan, wheel to zoom (3)" aria-label="Free orbit camera" aria-pressed="false">free</button>
+        <button id="mDrone" title="Drone: high behind the car, over the street map (5)" aria-label="Drone camera" aria-pressed="false">drone</button>
+        <button id="mDrive" class="primary" title="Drive the car yourself (4 / gamepad Start)" aria-label="Drive mode" aria-pressed="false">DRIVE</button>
+        <button id="share" title="Copy a link to this moment" aria-label="Copy a link to this moment">link</button>
+        <button id="record" title="Record the 3D view to a .webm file" aria-label="Record video" aria-pressed="false">rec</button>
+        <button id="mute" title="Mute (M)" aria-label="Mute" aria-pressed="false">🔇</button>
       </div>
     </div>
   </main>
@@ -304,7 +328,9 @@ $("camsLabel").textContent = `Dashcam · ${videos.length} cameras`;
 const stage = $("frame");
 // render mode needs an alpha channel (overlay layer) and a readable drawing buffer
 const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: RENDER, preserveDrawingBuffer: RENDER });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// DPR capped at 1.5 (splat rendering is fill-rate bound); adaptRes() below scales further under load
+const BASE_DPR = Math.min(devicePixelRatio || 1, 1.5);
+renderer.setPixelRatio(BASE_DPR);
 // AgX for the car's lit materials. Spark's splat shader never includes three's tone-mapping chunk,
 // so the reconstruction's colours pass through untouched (checked by pixel diff in testing).
 renderer.toneMapping = THREE.AgXToneMapping;
@@ -390,7 +416,15 @@ const carLoaded = (async () => {
     CAR.wheelR = api.dims.wheelR;
     carCredit = String(cfg.credit ?? "");
     window.otrvRender.credit = carCredit;
-    if (carCredit) { $("credit").textContent = carCredit; $("credit").hidden = false; }
+    if (carCredit) { // on screen: the credit without its inline URLs, linking to the model's page
+      const a = document.createElement("a");
+      a.textContent = carCredit.replace(/\s*\(https?:\/\/[^)]*\)/g, "");
+      a.title = carCredit;
+      const src = String(cfg.source?.url ?? "");
+      if (/^https:\/\//.test(src)) Object.assign(a, { href: src, target: "_blank", rel: "noopener" });
+      $("credit").replaceChildren(a);
+      $("credit").hidden = false;
+    }
     return true;
   } catch (e) {
     console.warn("models/car.json: couldn't load the car model, using the built-in car.", e);
@@ -607,7 +641,7 @@ let mode = "chase";
 let blend = null; // { from: pose, u: 0..1, dur }
 let intro = null; // { t } while the opening fly-in runs
 const lastPose = newPose();
-function startBlend(dur = 0.8) {
+function startBlend(dur = REDUCED_MOTION ? 0.001 : 0.8) {
   blend = { from: { pos: camera.position.clone(), quat: camera.quaternion.clone(), fov: camera.fov }, u: 0, dur };
 }
 function setMode(m) {
@@ -621,6 +655,7 @@ function setMode(m) {
     $(id).setAttribute("aria-pressed", String(n === m));
   }
   controls.enabled = m === "free";
+  app.classList.toggle("drive", m === "drive");
   // touch: let the page scroll vertically over the canvas except where the canvas needs every gesture
   renderer.domElement.style.touchAction = m === "free" || m === "drive" ? "none" : "pan-y";
   if (prev === "drive") driveExit();
@@ -723,7 +758,7 @@ function updateCamera(ps, dt, rdt = dt) {
 let clock = 0, playing = false, rate = 1, last = performance.now();
 const RATES = [0.5, 1, 2, 4];
 $("play").onclick = togglePlay;
-$("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; videos.forEach((v) => v.playbackRate = rate); };
+$("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; $("rate").setAttribute("aria-label", `Playback speed ${rate}×`); videos.forEach((v) => v.playbackRate = rate); };
 // keyboard: Space play (handbrake while driving) · <- / -> +-2 s (steer while driving) · 1/2/3/4 modes ·
 // U UI · F fullscreen · M mute · R reset view · H horn · V cycle camera · L headlights · P pause drive
 addEventListener("keydown", (e) => {
@@ -884,6 +919,7 @@ function renderHud(d, t) {
   if (d) {
     setText("speed", Math.round(kmh ? d.mph * 1.609344 : d.mph));
     setText("unit", kmh ? "KM/H" : "MPH");
+    setAttr("unit", "aria-label", kmh ? "Speed unit: km/h (switch to mph)" : "Speed unit: mph (switch to km/h)");
     const g = "PRND".indexOf(d.gear);
     if (domCache.get("gear") !== g) { domCache.set("gear", g); [...$("gears").children].forEach((el, i) => el.classList.toggle("on", i === g)); }
     const blinkOn = (t * 1.5) % 1 < 0.55;
@@ -903,6 +939,7 @@ function hud(t) {
   setText("tcur", fmt(t));
   const v = String(Math.round((t / DUR) * 1000));
   if (domCache.get("scrub") !== v) { domCache.set("scrub", v); $("scrub").value = v; }
+  setAttr("scrub", "aria-valuetext", `${fmt(t)} of ${fmt(DUR)}`);
 }
 function resize() {
   const { clientWidth: w, clientHeight: h } = stage;
@@ -1045,7 +1082,7 @@ function driveReset(t = clock, speed = null) {
 }
 const snapDrive = () => ({ x: drive.x, z: drive.z, psi: drive.psi, yAbs: drive.yAbs, pitch: drive.pitch ?? 0, roll: drive.roll ?? 0 });
 function onImpact(speed) {
-  drive.shake = Math.min(1, speed / 8);
+  drive.shake = REDUCED_MOTION ? 0 : Math.min(1, speed / 8);
   rumble(Math.min(1, speed / 10), 160);
   sound.impact?.(Math.min(1, speed / 10));
 }
@@ -1647,6 +1684,7 @@ const sound = (() => {
     const b = $("mute");
     b.setAttribute("aria-pressed", String(muted));
     b.textContent = muted || !ctx ? "🔇" : "🔊";
+    b.setAttribute("aria-label", muted ? "Unmute" : "Mute");
     b.title = muted ? "Unmute (M)" : ctx ? "Mute (M)" : "Sound starts on first interaction (M to mute)";
   }
   function toggleMute() {
@@ -1662,10 +1700,26 @@ const sound = (() => {
   return { horn, update, impact, toggleMute, get ready() { return !!ctx; } };
 })();
 $("mute").onclick = () => sound.toggleMute();
-window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek, get carApi() { return carApi; }, get mapLayer() { return mapLayer; }, get GEO() { return GEO; } }; // debug handle (tests)
+window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek, get carApi() { return carApi; }, get mapLayer() { return mapLayer; }, get GEO() { return GEO; }, get perf() { return perf; } }; // debug handle (tests)
+// adaptive resolution: when frames run over 22 ms (EMA), drop the pixel ratio in 15 % steps (down to
+// 55 % of the base); creep back up after a few seconds under 14 ms
+const perf = { ema: 16, scale: 1, t: 0 };
+function adaptRes(rdt) {
+  if (rdt <= 0 || rdt > 0.25) return; // hidden tabs and one-off hitches aren't load
+  perf.ema += (rdt * 1000 - perf.ema) * 0.05;
+  perf.t += rdt;
+  let next = perf.scale;
+  if (perf.t > 1 && perf.ema > 22) next = Math.max(0.55, perf.scale * 0.85);
+  else if (perf.t > 4 && perf.ema < 14) next = Math.min(1, perf.scale * 1.1);
+  if (next === perf.scale) return;
+  perf.scale = next; perf.t = 0;
+  renderer.setPixelRatio(BASE_DPR * next);
+  resize();
+}
 function loop(now) {
   const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
   last = now;
+  adaptRes(rdt);
   if (playing) {
     // follow the lead video when it is actually playing, so slow frames don't drag the clock behind the footage
     if (lead && !lead.paused && !lead.seeking && lead.readyState >= 3 && Math.abs(lead.currentTime - clock) < 1) clock = lead.currentTime;

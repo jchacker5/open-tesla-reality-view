@@ -286,7 +286,9 @@ controls.maxDistance = 80 * M;
 let mode = "chase";
 const smoothPos = new THREE.Vector3(), smoothLook = new THREE.Vector3();
 let first = true;
+let prevRoad = null;
 function setMode(m) {
+  prevRoad = null;
   mode = m;
   for (const [id, n] of [["mChase", "chase"], ["mDriver", "driver"], ["mFree", "free"]]) $(id).classList.toggle("on", n === m);
   controls.enabled = m === "free";
@@ -368,6 +370,13 @@ renderer.setAnimationLoop((now) => {
   basis.makeBasis(side.clone().negate(), UP, f);
   car.quaternion.setFromRotationMatrix(basis);
   car.position.copy(road);
+  // free orbit follows the car: shift camera and target by the car's motion since the last frame
+  if (mode === "free" && prevRoad) {
+    const d = road.clone().sub(prevRoad);
+    camera.position.add(d);
+    controls.target.add(d);
+  }
+  prevRoad = road.clone();
   car.visible = mode !== "driver";
   updateRibbon(clock);
 

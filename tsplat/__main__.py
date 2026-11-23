@@ -9,6 +9,7 @@ otrv egomask                               optional, once: mask your car's body 
 otrv prep <clip> --name drive1 --start 10 --dur 20
 otrv recon drive1                          COLMAP -> Brush training -> chase path
 otrv view drive1                           open the replay viewer
+otrv render drive1                         cinematic MP4 of the replay (optional AI clean-up)
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import webbrowser
 from importlib import resources
 from pathlib import Path
 
-from . import bench, brush, doctor, ingest, prep, recon, serve, speed
+from . import bench, brush, doctor, enhance, ingest, prep, recon, render, serve, speed
 
 DEFAULT_DATA = "data/teslacam"
 WORK = Path("work")
@@ -168,6 +169,46 @@ def build_parser() -> argparse.ArgumentParser:
     a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
     a.add_argument("name", help="run name")
     a.add_argument("--port", type=int, default=8765, help="local port")
+
+    a = cmd(
+        "render",
+        "render the replay to an MP4 (headless Chromium; needs `uv sync --extra render` and "
+        "`uv run playwright install chromium`). Optional NVIDIA Difix clean-up: see docs/RENDER.md",
+    )
+    a.add_argument("name", help="run name")
+    a.add_argument("--out", help="output MP4 (default: work/<name>/render.mp4)")
+    a.add_argument("--fps", type=float, default=30, help="output frames per second")
+    a.add_argument("--size", help="WxH in pixels, even (default: from --aspect: 1920x1080, 1080x1920, 1080x1080)")
+    a.add_argument("--aspect", choices=list(render.ASPECT_SIZES), help="16:9 hero, 9:16 vertical, 1:1 loop")
+    a.add_argument("--cam", choices=render.CAMS, default="chase", help="camera")
+    a.add_argument("--start", type=float, default=0.0, help="start time in seconds (replay time)")
+    a.add_argument("--end", type=float, help="end time in seconds (default: end of the replay)")
+    a.add_argument(
+        "--enhance",
+        choices=enhance.MODES,
+        default="none",
+        help="AI clean-up with NVIDIA Difix (non-commercial license; needs `uv sync --extra enhance`): "
+        "difix ~6 s/frame, difix-ref (guided by the nearest real front-camera frame) ~40 s/frame on an M4",
+    )
+    a.add_argument(
+        "--stabilize",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="flow-guided blend with the previous enhanced frame to cut flicker (default: on with --enhance)",
+    )
+    a.add_argument("--stabilize-strength", type=float, default=0.3, help="weight of the previous frame, 0-1")
+    a.add_argument("--no-label", action="store_true", help='omit the "AI-enhanced" corner label')
+    a.add_argument("--keep-frames", action="store_true", help="keep the per-frame PNGs in work/<name>/render/")
+    a.add_argument(
+        "--accept-nvidia-license", action="store_true", help=f"accept Difix's license (or env {enhance.LICENSE_ENV}=1)"
+    )
+    a.add_argument("--headed", action="store_true", help="show the browser window (if headless gets no GPU)")
+    a.add_argument(
+        "--swiftshader",
+        action="store_true",
+        help="software WebGL for machines without a GPU, e.g. CI (env OTRV_RENDER_SWIFTSHADER=1); slow",
+    )
+    a.add_argument("--viewer", dest="viewer_html", help=argparse.SUPPRESS)  # dev: render with another viewer page
     return ap
 
 
@@ -293,6 +334,32 @@ def cmd_view(args) -> None:
         srv.serve_forever()
 
 
+def cmd_render(args) -> None:
+    work = need_recon(args.name, "viewer/scene.ply", "viewer/path.json")
+    size, aspect = render.resolve_size(args.size, args.aspect)
+    if not 0 <= args.stabilize_strength <= 1:
+        raise SystemExit("--stabilize-strength must be between 0 and 1")
+    page = Path(args.viewer_html).read_bytes() if args.viewer_html else viewer_html().read_bytes()
+    opts = render.Options(
+        out=Path(args.out) if args.out else work / "render.mp4",
+        fps=args.fps,
+        size=size,
+        aspect=aspect,
+        cam=args.cam,
+        start=args.start,
+        end=args.end,
+        enhance=args.enhance,
+        stabilize=args.enhance != "none" if args.stabilize is None else args.stabilize,
+        stabilize_strength=args.stabilize_strength,
+        label=not args.no_label,
+        keep_frames=args.keep_frames,
+        headed=args.headed,
+        swiftshader=args.swiftshader or render.env_swiftshader(),
+        accept_license=args.accept_nvidia_license,
+    )
+    render.run(work, page, opts)
+
+
 def cmd_setup_brush(args) -> None:
     exe = brush.setup(Path(args.dir).expanduser())
     print(f"Brush installed: {exe}")
@@ -333,6 +400,8 @@ def dispatch(args) -> None:
         recon.export_nvs(WORK / args.name, args.fps)
     elif c == "view":
         cmd_view(args)
+    elif c == "render":
+        cmd_render(args)
 
 
 def _cmd_str(cmd) -> str:

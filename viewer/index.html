@@ -334,7 +334,7 @@ $("camsLabel").textContent = `Dashcam · ${videos.length} cameras`;
 const stage = $("frame");
 // render mode needs an alpha channel (overlay layer) and a readable drawing buffer
 const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: RENDER, preserveDrawingBuffer: RENDER });
-// DPR capped at 1.5 (splat rendering is fill-rate bound); adaptRes() below scales further under load
+// DPR capped at 1.5 (splat rendering is fill-rate bound); perfSample() below scales further under load
 const BASE_DPR = Math.min(devicePixelRatio || 1, 1.5);
 renderer.setPixelRatio(BASE_DPR);
 // AgX for the car's lit materials. Spark's splat shader never includes three's tone-mapping chunk,
@@ -804,13 +804,37 @@ $("share").onclick = async () => {
   try { await navigator.clipboard.writeText(url); toast("Link copied"); } catch { toast("Link is in the address bar"); }
 };
 $("scrub").oninput = (e) => seek((e.target.value / 1000) * DUR);
-// in-browser recording of the 3D view (MediaRecorder on the canvas stream) -> .webm download
+// In-browser recording -> .webm download. Each frame, right after it is rendered, the 3D canvas is
+// copied into a 2D canvas together with a credits strip (the car model's credit, plus the map tile
+// attribution while tiles are on screen); MediaRecorder records THAT canvas, so a clip never loses
+// its attributions.
 let rec = null;
+function creditLines() {
+  const lines = [];
+  if (carCredit) lines.push(carCredit.replace(/\s*\(https?:\/\/[^)]*\)/g, ""));
+  if (mapLayer.ready && (domCache.get("minimap.hidden") === false || mapLayer.underlay?.visible)) lines.push(MAP_ATTR);
+  return lines;
+}
+function paintRecording() {
+  const src = renderer.domElement, { canvas: c, ctx } = rec;
+  if (c.width !== src.width || c.height !== src.height) { c.width = src.width; c.height = src.height; }
+  ctx.drawImage(src, 0, 0);
+  const lines = creditLines();
+  if (!lines.length) return;
+  const k = Math.max(1, c.height / 720), fs = Math.round(11 * k), pad = Math.round(8 * k), h = lines.length * (fs + 4 * k) + pad;
+  ctx.fillStyle = "rgba(7,8,10,0.55)";
+  ctx.fillRect(0, c.height - h, c.width, h);
+  ctx.font = `${fs}px ui-monospace, Menlo, monospace`;
+  ctx.fillStyle = "rgba(232,234,238,0.85)";
+  ctx.textBaseline = "bottom";
+  lines.forEach((l, i) => ctx.fillText(l, pad, c.height - pad / 2 - (lines.length - 1 - i) * (fs + 4 * k), c.width - 2 * pad));
+}
 function startRecording() {
-  const cv = renderer.domElement;
-  if (!window.MediaRecorder || !cv.captureStream) { toast("Recording isn't supported in this browser"); return; }
+  const comp = document.createElement("canvas");
+  if (!window.MediaRecorder || !comp.captureStream) { toast("Recording isn't supported in this browser"); return; }
   const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"].find((m) => MediaRecorder.isTypeSupported(m)) ?? "";
-  const stream = cv.captureStream(30);
+  comp.width = renderer.domElement.width; comp.height = renderer.domElement.height;
+  const stream = comp.captureStream(30);
   const recorder = new MediaRecorder(stream, { ...(mime && { mimeType: mime }), videoBitsPerSecond: 12_000_000 });
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
@@ -826,7 +850,7 @@ function startRecording() {
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   };
   recorder.start(1000);
-  rec = { recorder, t0: performance.now() };
+  rec = { recorder, t0: performance.now(), canvas: comp, ctx: comp.getContext("2d", { alpha: false }) };
   $("record").classList.add("rec");
   $("record").setAttribute("aria-pressed", "true");
   toast("Recording the 3D view · press rec again to stop and save");
@@ -1713,26 +1737,59 @@ const sound = (() => {
   return { horn, update, impact, toggleMute, get ready() { return !!ctx; } };
 })();
 $("mute").onclick = () => sound.toggleMute();
-window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek, get carApi() { return carApi; }, get mapLayer() { return mapLayer; }, get GEO() { return GEO; }, get perf() { return perf; } }; // debug handle (tests)
-// adaptive resolution: when frames run over 22 ms (EMA), drop the pixel ratio in 15 % steps (down to
-// 55 % of the base); creep back up after a few seconds under 14 ms
-const perf = { ema: 16, scale: 1, t: 0 };
-function adaptRes(rdt) {
-  if (rdt <= 0 || rdt > 0.25) return; // hidden tabs and one-off hitches aren't load
-  perf.ema += (rdt * 1000 - perf.ema) * 0.05;
-  perf.t += rdt;
+window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek, get carApi() { return carApi; }, get mapLayer() { return mapLayer; }, get GEO() { return GEO; }, get perf() { return perf; }, get rec() { return rec; } }; // debug handle (tests)
+// ---- adaptive resolution ----
+// Driven by what drawing actually costs, not by the rAF interval (a 30 Hz cap, Low Power Mode or a
+// 120 Hz display would be misread as load): every frame times renderer.render() on the CPU, and every
+// 15th frame also waits for the GPU with gl.finish(). The frame interval only counts as load when it
+// clearly exceeds the display's own steady interval (median of the first 60 frames after loading).
+// Hysteresis: 2 s over budget (22 ms) lowers the pixel ratio 15 % (floor 55 %); 2 s comfortably under
+// (< 14 ms and frames at the display's pace) raises it 10 %.
+const PERF = { budget: 22, comfy: 14, hold: 2, floor: 0.55 };
+const perf = { scale: 1, cpu: 0, gpu: 0, load: 0, base: 0, interval: 0, over: 0, under: 0, n: 0, firsts: [] };
+function perfReset() { Object.assign(perf, { cpu: 0, gpu: 0, load: 0, base: 0, interval: 0, over: 0, under: 0, n: 0, firsts: [] }); }
+function perfSample(rdt, loadMs) { // rdt: seconds since the previous frame; loadMs: measured draw cost
+  if (!(rdt > 0) || rdt > 0.25) return perf.scale; // hidden tabs and one-off hitches aren't load
+  const ms = rdt * 1000;
+  if (!perf.base) {
+    perf.firsts.push(ms);
+    if (perf.firsts.length >= 60) perf.base = perf.firsts.sort((x, y) => x - y)[30];
+  }
+  perf.interval = perf.interval ? perf.interval + (ms - perf.interval) * 0.1 : ms;
+  perf.load = perf.load ? perf.load + (loadMs - perf.load) * 0.1 : loadMs;
+  const slowFrames = perf.base > 0 && perf.interval > Math.max(PERF.budget, perf.base * 1.5);
+  const over = perf.load > PERF.budget || slowFrames;
+  const under = perf.load < PERF.comfy && (!perf.base || perf.interval < perf.base * 1.25);
+  perf.over = over ? perf.over + rdt : 0;
+  perf.under = under ? perf.under + rdt : 0;
   let next = perf.scale;
-  if (perf.t > 1 && perf.ema > 22) next = Math.max(0.55, perf.scale * 0.85);
-  else if (perf.t > 4 && perf.ema < 14) next = Math.min(1, perf.scale * 1.1);
-  if (next === perf.scale) return;
-  perf.scale = next; perf.t = 0;
-  renderer.setPixelRatio(BASE_DPR * next);
-  resize();
+  if (perf.over > PERF.hold) next = Math.max(PERF.floor, perf.scale * 0.85);
+  else if (perf.under > PERF.hold) next = Math.min(1, perf.scale * 1.1);
+  if (next !== perf.scale) {
+    perf.scale = next; perf.over = perf.under = 0;
+    if (!RENDER) { renderer.setPixelRatio(BASE_DPR * next); resize(); }
+  }
+  return perf.scale;
 }
+const glc = renderer.getContext();
+// draw one interactive frame: measure its cost, feed the recorder
+function drawFrame(rdt) {
+  const t0 = performance.now();
+  renderer.render(scene, camera);
+  const cpu = performance.now() - t0;
+  perf.cpu = cpu;
+  if (++perf.n % 15 === 0) { glc.finish(); perf.gpu = performance.now() - t0; }
+  if (rec) paintRecording();
+  if (ready) perfSample(rdt, Math.max(cpu, perf.gpu));
+}
+// test hook: the live scale plus the controller, so it can be driven with synthetic frame timings
+window.otrvPerf = {
+  get scale() { return perf.scale; }, get load() { return perf.load; }, get base() { return perf.base; }, get interval() { return perf.interval; },
+  reset: perfReset, sample: perfSample, config: PERF,
+};
 function loop(now) {
   const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
   last = now;
-  adaptRes(rdt);
   if (playing) {
     // follow the lead video when it is actually playing, so slow frames don't drag the clock behind the footage
     if (lead && !lead.paused && !lead.seeking && lead.readyState >= 3 && Math.abs(lead.currentTime - clock) < 1) clock = lead.currentTime;
@@ -1752,7 +1809,7 @@ function loop(now) {
     car.visible = carSettled && carVisibleFrom(camera);
     ribbon.visible = false;
     updateKeyLight();
-    renderer.render(scene, camera);
+    drawFrame(rdt);
     return;
   }
   readInput(rdt); // gamepad buttons (Start / Y / Back) and the horn also work during replay
@@ -1773,7 +1830,7 @@ function loop(now) {
   }
   const s = telAt(clock);
   sound.update({ speed: s ? s.mph / 2.23694 : 0, playing, reverse: s?.gear === "R" });
-  renderer.render(scene, camera);
+  drawFrame(rdt);
 }
 
 /* ---- Deterministic render mode: window.otrvRender ----------------------------------------------

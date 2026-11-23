@@ -188,12 +188,13 @@ for (const z of [1.445, -1.445]) for (const x of [-0.84, 0.84]) {
   car.add(w, cap);
 }
 // full-width tail light bar and slim headlights
-const tail = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.05, 0.04), new THREE.MeshBasicMaterial({ color: 0xff2a3a }));
-tail.position.set(0, 1.0, -2.45);
-const brake = new THREE.MeshBasicMaterial({ color: 0xff2a3a });
+// (the tail narrows in plan view: keep the bar and lamps inside the body's ~0.77 m half-width there)
+const tail = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.035, 0.03), new THREE.MeshBasicMaterial({ color: 0xc4182a }));
+tail.position.set(0, 1.0, -2.435);
+const brake = new THREE.MeshBasicMaterial({ color: 0xc4182a });
 for (const x of [-0.72, 0.72]) {
-  const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.09, 0.04), brake);
-  lamp.position.set(x * 0.92, 0.98, -2.44);
+  const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.08, 0.03), brake);
+  lamp.position.set(x * 0.8, 0.98, -2.425);
   car.add(lamp);
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.05, 0.04), new THREE.MeshBasicMaterial({ color: 0xeaf2ff }));
   head.position.set(x * 0.95, 0.68, 2.36);

@@ -24,7 +24,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --locked --group dev
+      - run: uv sync --locked --group dev --extra studio
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
@@ -74,6 +74,7 @@ jobs:
         run: |
           uv build --wheel --out-dir "$RUNNER_TEMP/dist"
           unzip -l "$RUNNER_TEMP"/dist/*.whl | grep -q "tsplat/viewer/index.html"
+          unzip -l "$RUNNER_TEMP"/dist/*.whl | grep -q "tsplat/studio/static/app.js"
       - name: Friendly failures
         run: |
           if uv run otrv prep 2026-01-02_03-04-05 --name bad --start 7 --dur 5 2>err.txt; then exit 1; fi

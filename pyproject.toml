@@ -7,13 +7,21 @@ dependencies = ["numpy>=1.26", "pillow>=10", "scipy>=1.11"]
 
 [project.optional-dependencies]
 movers = ["ultralytics>=8.3"]
+studio = [
+    "fastapi==0.162.1",
+    "uvicorn==0.54.0",
+]
 
 [project.scripts]
 otrv = "tsplat.__main__:main"
 tsplat = "tsplat.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+    "ruff>=0.6",
+]
 
 [tool.ruff]
 line-length = 120

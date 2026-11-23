@@ -39,7 +39,7 @@ CSP = (
     "script-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
     "form-action 'self'; frame-ancestors 'none'"
 )
-# TODO(viewer): the viewer (viewer/index.html, owned by feat/viewer-v2) still imports three.js and Spark
+# TODO(viewer, #13): the viewer (viewer/index.html, owned by feat/viewer-v2) still imports three.js and Spark
 # from cdn.jsdelivr.net, so /cities/ pages can't carry the studio's `default-src 'self'` CSP yet. Once the
 # viewer vendors those libraries, apply CSP to /cities/ too.
 CITY_CSP = "object-src 'none'; base-uri 'none'; frame-ancestors 'self'"

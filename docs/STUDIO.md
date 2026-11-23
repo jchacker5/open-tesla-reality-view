@@ -40,7 +40,7 @@ shows their status.
   is deleted when the build succeeds.
 - **Known gap.** The replay viewer (`viewer/index.html`) still loads three.js and Spark from
   cdn.jsdelivr.net, so `/cities/<name>/` pages don't get the strict CSP yet. Once the viewer vendors
-  those libraries, `CITY_CSP` in `tsplat/studio/server.py` should become `default-src 'self'` too.
+  those libraries (issue #13), `CITY_CSP` in `tsplat/studio/server.py` should become `default-src 'self'` too.
 
 ## How a build runs
 

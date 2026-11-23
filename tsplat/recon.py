@@ -236,23 +236,33 @@ def export_path(work: Path, dense: Path) -> Path:
     meta = json.loads((work / "meta.json").read_text())
     lines = _image_lines(dense)
     centres: dict[int, list] = {}
-    ups = []
-    for line in lines[::2]:
-        p = line.split()
+    ups: dict[int, list] = {}
+    # Follow the front camera (rig reference, CAM_HEIGHT above the road) when it is registered.
+    # Averaging all cameras pulls the point down/back (the back camera is ~3 m behind and lower) and
+    # tilts "up" (the back camera is pitched down), which sank the car into the road.
+    poses = [line.split() for line in lines[::2]]
+    ref = "front" if any(p[9].startswith("front/") for p in poses) else None
+    for p in poses:
+        if ref and not p[9].startswith(ref + "/"):
+            continue
         R = qvec_to_R([float(v) for v in p[1:5]])
         t = np.array([float(v) for v in p[5:8]])
         idx = int(Path(p[9]).stem.split("_")[-1])
         centres.setdefault(idx, []).append(-R.T @ t)
-        ups.append(R.T @ np.array([0, -1.0, 0]))
+        ups.setdefault(idx, []).append(R.T @ np.array([0, -1.0, 0]))
     if len(centres) < 3:
         raise SystemExit("too few registered frames to build a camera path")
-    up = np.mean(ups, 0)
-    up /= np.linalg.norm(up)
     idxs = sorted(centres)
     P = np.array([np.mean(centres[i], 0) for i in idxs])
     k = 2  # moving-average smoothing
     Ps = np.array([P[max(0, i - k) : i + k + 1].mean(0) for i in range(len(P))])
     F = np.gradient(Ps, axis=0)
+    F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-9
+    # up = camera up with pitch removed (perpendicular to the direction of travel)
+    U = np.array([np.mean(ups[i], 0) for i in idxs])
+    U -= (U * F).sum(1, keepdims=True) * F
+    up = U.mean(0)
+    up /= np.linalg.norm(up)
     F -= np.outer(F @ up, up)
     F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-9
     path = [

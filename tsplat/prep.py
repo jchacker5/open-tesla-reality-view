@@ -73,7 +73,7 @@ def video_fps(path: str) -> float:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=r_frame_rate",
+            "stream=avg_frame_rate",  # some Tesla clips report r_frame_rate=10000/1 (a timebase)
             "-of",
             "csv=p=0",
             path,
@@ -133,7 +133,9 @@ def _gray(src, size=(320, 240)) -> np.ndarray:
 def build_ego_masks(index: str, out_dir: str, max_clips: int = 40) -> None:
     """Best ego mask: the body looks identical across *different drives*, everything else doesn't.
     Grabs one mid-clip frame per camera from up to `max_clips` clips and keeps low-variance pixels."""
-    clips = [c for c in json.loads(Path(index).read_text()) if len(c["cams"]) >= 4]
+    # Sentry clips are recorded parked, often many at one spot, so the whole scene looks "still"
+    # across them; use driving clips only.
+    clips = [c for c in json.loads(Path(index).read_text()) if len(c["cams"]) >= 4 and c["kind"] != "SentryClips"]
     clips = clips[:: max(1, len(clips) // max_clips)][:max_clips]
     if len(clips) < 8:
         raise SystemExit(f"need >= 8 clips from different places for a good ego mask, have {len(clips)}")
@@ -168,7 +170,7 @@ def build_ego_masks(index: str, out_dir: str, max_clips: int = 40) -> None:
                 continue
             im = Image.open(io.BytesIO(r.stdout))
             size = size or im.size
-            stack.append(_gray(im))
+            stack.append(_gray(io.BytesIO(r.stdout)))
         if len(stack) < 8:
             continue
         spread = np.median(np.abs(np.stack(stack) - np.median(stack, 0)), 0)

@@ -68,7 +68,18 @@
   .apSpans i { position: absolute; top: 0; bottom: 0; background: rgba(61,123,255,.55); border-radius: 2px; }
   input[type=range] { width: 100%; accent-color: var(--accent); position: relative; }
   .time { font: 11px var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; }
-  .loading { position: absolute; inset: 0; pointer-events: none; display: grid; place-items: center; color: var(--dim); font: 12px var(--mono); }
+  .loading { position: absolute; inset: 0; pointer-events: none; display: grid; place-items: center; color: var(--dim); font: 12px var(--mono); z-index: 2; }
+  .loadCard { width: min(280px, 70%); }
+  .loadLabel { margin-bottom: 8px; letter-spacing: .06em; }
+  .progress { height: 3px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .error { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(7,8,10,.9); z-index: 4; }
+  .errCard { max-width: 520px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px 24px; }
+  .errIcon { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(245,165,36,.14);
+    color: var(--warn); font: 700 15px var(--mono); margin-bottom: 12px; }
+  .errCard h2 { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
+  .errCard p { margin: 0; color: #b9bec8; line-height: 1.6; }
+  .errCard code { font: 12px var(--mono); background: #1a1d23; padding: 1px 5px; border-radius: 4px; color: var(--text); }
   @media (max-width: 820px) {
     body { overflow: auto; }
     .app { grid-template-columns: 1fr; grid-template-rows: 60vh auto; height: auto; padding: 16px; }
@@ -91,7 +102,13 @@
     <div class="view" id="view">
       <div class="frame" id="frame">
         <div class="vignette"></div>
-        <div class="loading" id="loading">loading splat…</div>
+        <div class="loading" id="loading" role="status">
+          <div class="loadCard"><div class="loadLabel">loading splat <span id="loadPct"></span></div>
+            <div class="progress" role="progressbar" aria-label="Loading splat" aria-valuemin="0" aria-valuemax="100"><i id="loadBar"></i></div></div>
+        </div>
+        <div class="error" id="error" role="alert" hidden>
+          <div class="errCard"><div class="errIcon" aria-hidden="true">!</div><h2 id="errTitle"></h2><p id="errBody"></p></div>
+        </div>
         <div class="hud" id="hud">
           <div class="hudTop" id="speedBlock" hidden>
             <div class="speed" id="speed">0</div>
@@ -114,7 +131,7 @@
     </div>
     <div class="bar" id="bar">
       <div class="btns">
-        <button id="play" title="Play / pause (space)">❚❚</button>
+        <button id="play" title="Play / pause (space)" aria-label="Play">▶</button>
         <button id="rate" title="Playback speed">1×</button>
       </div>
       <div>
@@ -146,10 +163,38 @@ import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.j
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
 
 const $ = (id) => document.getElementById(id);
-const [path, tel] = await Promise.all([
-  fetch("path.json").then((r) => r.json()),
-  fetch("telemetry.json").then((r) => r.json()).catch(() => []),
+// ---- load states: progress bar, error card naming the cause ----
+const halt = () => new Promise(() => {}); // stop module evaluation quietly after an error card
+function showError(title, html) {
+  $("loading").hidden = true;
+  $("error").hidden = false;
+  $("errTitle").textContent = title;
+  $("errBody").innerHTML = html;
+}
+if (location.protocol === "file:") {
+  showError("Open this viewer through a web server",
+    "Browsers block <code>fetch()</code> of local files, so the splat and path can't load from <code>file://</code>.<br>" +
+    "In the viewer folder run <code>python3 -m http.server 8000</code> and open <code>http://localhost:8000</code>.");
+  await halt();
+}
+const [path, tel, plyHead] = await Promise.all([
+  fetch("path.json").then(async (r) => (r.ok ? r.json() : { missing: r.status }), (e) => ({ missing: String(e) })).catch((e) => ({ broken: String(e) })),
+  fetch("telemetry.json").then((r) => (r.ok ? r.json() : []), () => []).catch(() => []),
+  fetch("scene.ply", { method: "HEAD" }).then((r) => r.status, () => 0),
 ]);
+if (path.missing || path.broken || !path.frames?.length) {
+  showError(path.broken ? "path.json is unreadable" : "path.json is missing",
+    `The viewer needs <code>path.json</code> (the car's trajectory) next to <code>index.html</code>` +
+    (path.missing ? ` (got ${path.missing}).` : path.broken ? ` but it failed to parse (${path.broken}).` : ", but it has no frames.") +
+    `<br>Run <code>tsplat recon &lt;work-dir&gt;</code>; it writes <code>viewer/path.json</code>.`);
+  await halt();
+}
+if (plyHead === 404) {
+  showError("scene.ply not found (404)",
+    "The Gaussian splat <code>scene.ply</code> isn't next to <code>index.html</code>.<br>" +
+    "Run <code>tsplat recon &lt;work-dir&gt;</code> (it trains and copies the splat into <code>viewer/</code>), or copy a trained <code>.ply</code> there.");
+  await halt();
+}
 const M = 1 / path.metresPerUnit;          // metres -> scene units
 const UP = new THREE.Vector3(...path.up);
 const frames = path.frames.map((f) => ({ t: f.t, p: new THREE.Vector3(...f.p), f: new THREE.Vector3(...f.f) }));
@@ -188,11 +233,23 @@ scene.add(new SparkRenderer({ renderer }));
 
 const splat = new SplatMesh({
   url: "scene.ply",
-  onProgress: (e) => { if (e.lengthComputable) $("loading").textContent = `loading splat… ${Math.round((100 * e.loaded) / e.total)}%`; },
+  onProgress: (e) => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round((100 * e.loaded) / e.total);
+    $("loadPct").textContent = `${pct}%`;
+    $("loadBar").style.width = `${pct}%`;
+    $("loadBar").parentElement.setAttribute("aria-valuenow", pct);
+  },
 });
-splat.initialized.then(
-  () => $("loading").remove(),
-  (err) => { console.error("scene.ply failed to load", err); $("loading").textContent = "splat unavailable (scene.ply failed to load)"; },
+let ready = false; // car, ribbon and playback wait for the splat
+const sceneReady = splat.initialized.then(
+  () => { $("loading").hidden = true; ready = true; },
+  (err) => {
+    console.warn("scene.ply failed to load", err);
+    showError("scene.ply failed to load", `The splat file was found but couldn't be decoded: <code>${String(err?.message ?? err).replace(/</g, "&lt;")}</code>.<br>` +
+      "Check that it's a 3DGS <code>.ply</code> (or re-export it with <code>tsplat recon</code>).");
+    throw err;
+  },
 );
 scene.add(splat);
 
@@ -750,17 +807,26 @@ function updateCamera(ps, dt, rdt = dt) {
 }
 
 // ---- playback ----
-let clock = 0, playing = true, rate = 1, last = performance.now();
+// Starts paused; playback (and the intro fly-in) begin once the splat has loaded.
+let clock = 0, playing = false, rate = 1, last = performance.now();
 const RATES = [0.5, 1, 2, 4];
 $("play").onclick = togglePlay;
 $("rate").onclick = () => { rate = RATES[(RATES.indexOf(rate) + 1) % RATES.length]; $("rate").textContent = rate + "×"; videos.forEach((v) => v.playbackRate = rate); };
 addEventListener("keydown", (e) => { if (e.code === "Space") { e.preventDefault(); togglePlay(); } });
 $("scrub").oninput = (e) => seek((e.target.value / 1000) * DUR);
-function togglePlay() { playing = !playing; $("play").textContent = playing ? "❚❚" : "▶"; videos.forEach((v) => playing ? v.play().catch(() => {}) : v.pause()); }
-function seek(t) { clock = t; chaseSpring.ready = false; videos.forEach((v) => { v.currentTime = t; if (playing && v.paused) v.play().catch(() => {}); }); }
-videos.forEach((v) => v.play().catch(() => {}));
-if (!REDUCED_MOTION && Q.get("intro") !== "0") intro = { t: 0 };
-
+function setPlaying(on) {
+  playing = on && ready;
+  $("play").textContent = playing ? "❚❚" : "▶";
+  $("play").setAttribute("aria-label", playing ? "Pause" : "Play");
+  videos.forEach((v) => playing ? v.play().catch(() => {}) : v.pause());
+}
+function togglePlay() { setPlaying(!playing); }
+function seek(t) { clock = clamp(t, 0, DUR); chaseSpring.ready = false; videos.forEach((v) => { v.currentTime = clock; if (playing && v.paused) v.play().catch(() => {}); }); }
+setPlaying(false);
+sceneReady.then(() => {
+  if (!REDUCED_MOTION) setPlaying(true);
+  if (!REDUCED_MOTION && Q.get("intro") !== "0") intro = { t: 0 };
+}, () => {});
 function telAt(t) {
   if (!tel.length) return null;
   let lo = 0, hi = tel.length - 1;
@@ -897,7 +963,8 @@ renderer.setAnimationLoop((now) => {
   placeCar(ps, clock);
   updateRibbon(clock);
   updateCamera(ps, dt, rdt);
-  car.visible = carVisibleFrom(camera);
+  car.visible = ready && carVisibleFrom(camera);
+  ribbon.visible = ready;
   updateKeyLight();
   hud(clock);
   renderer.render(scene, camera);

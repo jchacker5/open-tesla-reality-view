@@ -204,7 +204,13 @@ function toast(msg, ms = 1800) {
 }
 // ---- load states: progress bar, error card naming the cause ----
 const halt = () => new Promise(() => {}); // stop module evaluation quietly after an error card
+// render-mode handle exists from the first moment so a recorder can await it (API documented below)
+let resolveReady, rejectReady;
+const renderReady = new Promise((a, b) => { resolveReady = a; rejectReady = b; });
+renderReady.catch(() => {});
+window.otrvRender = { ready: renderReady, duration: NaN, frame: async () => { throw new Error("otrvRender: not ready yet, await otrvRender.ready"); } };
 function showError(title, html) {
+  rejectReady(new Error(title));
   $("loading").hidden = true;
   $("error").hidden = false;
   $("errTitle").textContent = title;
@@ -257,7 +263,8 @@ $("camsLabel").textContent = `Dashcam · ${videos.length} cameras`;
 
 // ---- three / spark ----
 const stage = $("frame");
-const renderer = new THREE.WebGLRenderer({ antialias: false });
+// render mode needs an alpha channel (overlay layer) and a readable drawing buffer
+const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: RENDER, preserveDrawingBuffer: RENDER });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 // AgX for the car's lit materials. Spark's splat shader never includes three's tone-mapping chunk,
 // so the reconstruction's colours pass through untouched (checked by pixel diff in testing).
@@ -268,7 +275,8 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d10);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.05 * M, 2000 * M);
 camera.up.copy(UP);
-scene.add(new SparkRenderer({ renderer }));
+const spark = new SparkRenderer({ renderer });
+scene.add(spark);
 
 const splat = new SplatMesh({
   url: "scene.ply",
@@ -990,8 +998,8 @@ function updateKeyLight() {
   key.target.position.copy(car.position);
 }
 
-window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, M, UP, view, poseAt, setMode, seek }; // debug handle (tests)
-renderer.setAnimationLoop((now) => {
+window.__otrv = { THREE, scene, camera, car, controls, orbitCam, egoHole, splat, spark, rendererRef: renderer, M, UP, view, poseAt, setMode, seek }; // debug handle (tests)
+function loop(now) {
   const rdt = Math.max(0, Math.min(0.5, (now - last) / 1000)), dt = Math.min(0.1, rdt);
   last = now;
   if (playing) {
@@ -1017,7 +1025,94 @@ renderer.setAnimationLoop((now) => {
   updateKeyLight();
   hud(clock);
   renderer.render(scene, camera);
-});
+}
+
+/* ---- Deterministic render mode: window.otrvRender ----------------------------------------------
+ * For offline compositing / video export. Open the viewer with ?render=1 (implies ui=0, intro=0, no
+ * autoplay; DPR defaults to 1, override with ?dpr=2). The interactive loop is off; frames are only
+ * drawn on request.
+ *
+ *   otrvRender.ready      Promise<void>: resolves once path.json + scene.ply are loaded; rejects with
+ *                         the error-card title if loading failed.
+ *   otrvRender.duration   clip length in seconds (path.json "dur").
+ *   await otrvRender.frame(t, layer = "full", { cam = "chase" } = {})
+ *       -> { t, layer, cam, width, height, sortFrames }
+ *     t      clip time in seconds (clamped to [0, duration]).
+ *     layer  "splat"   the reconstruction only; car, ribbon and contact shadow hidden; opaque.
+ *            "overlay" car + ribbon + contact shadow over a TRANSPARENT background (clear alpha 0,
+ *                      straight alpha in toDataURL / screenshots); the splat is hidden.
+ *            "full"    everything (no UI chrome); opaque.
+ *     cam    "chase" | "driver".
+ *   What a call does: sets the clock to t and pauses the camera videos; poses car, lamps, wheels,
+ *   ribbon and camera with no smoothing lag (the chase heading spring is simulated from t-3 s at a
+ *   fixed 60 Hz, so the image depends only on t); then renders frames until Spark's asynchronous
+ *   sort has caught up with this exact view (sortedCenter == camera position, no sort in flight or
+ *   pending, stable for 3 consecutive rAFs, at least 3 rAFs, at most ~4 s); finally renders once more
+ *   and calls gl.finish(). The drawing buffer is preserved, so canvas.toDataURL() or a page
+ *   screenshot taken after the promise resolves contains exactly that frame.
+ *   Composite: splat layer, then overlay layer "over" it == the full layer.
+ * ------------------------------------------------------------------------------------------------ */
+const raf = () => new Promise((r) => requestAnimationFrame(r));
+function sparkSettled() {
+  camera.getWorldPosition(_v);
+  return !spark.sorting && !spark.sortDirty && spark.sortedCenter.distanceTo(_v) < 1e-6 + 1e-4 * M && spark.display === spark.current;
+}
+let renderBusy = Promise.resolve();
+async function renderFrame(t, layer = "full", { cam = "chase" } = {}) {
+  if (!["splat", "overlay", "full"].includes(layer)) throw new Error(`otrvRender: unknown layer "${layer}"`);
+  t = clamp(+t || 0, 0, DUR);
+  clock = t;
+  setPlaying(false);
+  for (const v of videos) { v.pause(); if (v.readyState) v.currentTime = Math.min(t, v.duration || t); }
+  // deterministic pose: no blend, no intro, no user offsets, spring settled for this t
+  blend = null; intro = null;
+  Object.assign(view, { yaw: 0, pitch: 0, zoom: 1, idle: 99 });
+  const ps = poseAt(t);
+  placeCar(ps, t);
+  updateRibbon(t);
+  if (cam === "driver") driverPose(modePose, ps);
+  else { settleChaseSpring(t); chasePose(modePose, ps.carPos, chaseSpring.f); }
+  applyPose(modePose);
+  camera.updateMatrixWorld();
+  const overlay = layer !== "splat";
+  car.visible = overlay && carVisibleFrom(camera);
+  ribbon.visible = overlay;
+  // hide the SparkRenderer mesh itself: hiding only the SplatMesh would still draw the last sorted splats
+  spark.visible = splat.visible = layer !== "overlay";
+  scene.background = layer === "overlay" ? null : BG;
+  renderer.setClearColor(0x000000, layer === "overlay" ? 0 : 1);
+  updateKeyLight();
+  hud(t);
+  let frames = 0, stable = 0;
+  if (splat.visible) {
+    for (; frames < 240 && stable < 3; frames++) {
+      renderer.render(scene, camera);
+      await raf();
+      stable = frames >= 2 && sparkSettled() ? stable + 1 : 0;
+    }
+  }
+  renderer.render(scene, camera);
+  renderer.getContext().finish();
+  const { width, height } = renderer.domElement;
+  return { t, layer, cam, width, height, sortFrames: frames };
+}
+const BG = scene.background;
+if (RENDER) {
+  const dpr = parseFloat(Q.get("dpr"));
+  renderer.setPixelRatio(Number.isFinite(dpr) && dpr > 0 ? dpr : 1);
+  resize();
+  Object.assign(window.otrvRender, {
+    duration: DUR,
+    // calls are serialised so overlapping requests can't interleave poses
+    frame: (t, layer, opts) => (renderBusy = renderBusy.then(() => renderFrame(t, layer, opts), () => renderFrame(t, layer, opts))),
+  });
+  sceneReady.then(async () => { await raf(); renderer.render(scene, camera); }).then(resolveReady, rejectReady);
+} else {
+  window.otrvRender.duration = DUR;
+  window.otrvRender.frame = async () => { throw new Error("otrvRender.frame needs ?render=1"); };
+  sceneReady.then(resolveReady, rejectReady);
+  renderer.setAnimationLoop(loop);
+}
 </script>
 </body>
 </html>

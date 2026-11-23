@@ -14,7 +14,9 @@ never leaves your machine.
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d7bff)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-3ecf8e)](CONTRIBUTING.md)
 
-<!-- media: demo video + screenshots land here (docs/media/) -->
+<img src="docs/media/hero.gif" alt="Chase-cam replay of a real drive rebuilt as a Gaussian splat from a Tesla's dashcam cameras: houses along the road, a car model on the reconstructed street, a blue path ribbon ahead, speed in the corner" width="760">
+
+<sub>A real 20-second drive at about 28 mph, rebuilt from a 4-camera (HW3) car's dashcam footage.</sub>
 
 </div>
 

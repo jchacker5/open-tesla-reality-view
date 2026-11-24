@@ -40,6 +40,7 @@ from . import (
     densify,
     doctor,
     enhance,
+    georef,
     holdout,
     ingest,
     prep,
@@ -379,6 +380,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("name", help="run name")
 
+    a = cmd(
+        "georef",
+        "fit the reconstructed path to the car's GPS: metric scale, true north and a map origin, written to "
+        "viewer/georef.json, plus a check against the speed-derived scale (needs `uv sync --extra native`; "
+        "recon runs it too)",
+    )
+    a.add_argument("name", help="run name")
+    a.add_argument("--inlier-m", type=float, default=3.0, help="RANSAC inlier threshold, metres")
+
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
     a.add_argument("--note", default="", help="what changed in this run (the lever being tested)")
@@ -549,6 +559,11 @@ def cmd_recon(args) -> None:
     else:
         dense = recon.restore_dense(work)  # levers below edit dense/ in place; start each run clean
     recon.export_path(work, dense)
+    if georef.available() and all((work / "viewer" / f).exists() for f in ("path.json", "telemetry.json")):
+        try:  # best effort: a drive without usable GPS still reconstructs
+            georef.run(work)
+        except Exception as e:
+            print(f"georef: skipped ({e})")
     meta = json.loads((work / "meta.json").read_text())
     names = [line.split()[9] for line in recon._image_lines(dense)[::2] if len(line.split()) >= 10]
     split = holdout.plan(names, meta["fps"], meta["dur"]) if args.eval else holdout.Split()
@@ -737,6 +752,8 @@ def dispatch(args) -> None:
         cmd_clean(args)
     elif c == "collision":
         collision.run(need_recon(args.name, "viewer/scene.ply", "viewer/path.json"))
+    elif c == "georef":
+        georef.run(need_recon(args.name, "viewer/path.json", "viewer/telemetry.json"), args.inlier_m)
     elif c == "bench":
         work = need_prep(args.name)
         if not recon_attempted(work):

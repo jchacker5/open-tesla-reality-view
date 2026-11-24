@@ -1,0 +1,38 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
+[Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-11-23
+
+First public release.
+
+### Added
+- **Pipeline:** TeslaCam ingest, frame and mask prep, rig-aware COLMAP SfM, Brush splat training
+  on Metal, and a replay viewer. Supports 4- and 6-camera cars (#1).
+- **Telemetry:** SEI decoder (speed, gear, steering, Autopilot, GPS) in pure Python.
+- **Evaluation:** `otrv bench` scores, gates and logs every reconstruction for hill-climbing (#6).
+- **Viewer v2:** drive mode, real car model support, cinematic camera, HUD, render API and an
+  opt-in street map (#10, #15).
+- **Studio:** a local web app to pick footage, queue builds with live progress and open results
+  (#14).
+- **Pipeline v2:** bench v2, post-train clean-up, transparent sky, dense depth init, colour
+  normalisation, 6 fps sampling, Brush from source and a collision bake (#16).
+- **Render:** `otrv render` makes cinematic MP4s, with optional NVIDIA Difix clean-up (#12).
+- **C++ core:** a C++20 SEI decoder with nanobind Python bindings, checked against the Python
+  decoder on fuzzed input under ASan/UBSan (#18).
+- **Georeferencing:** a GPS fit gives metric scale, true north and a map origin (#19).
+- `doctor`, `setup-brush` and `suggest` commands, plus friendlier CLI errors (#11).
+- **Project:** an architecture and lifecycle guide ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)),
+  CodeQL scanning (Python, JavaScript, C/C++), Dependabot, CODEOWNERS, and a tag-driven release
+  workflow.
+
+### Fixed
+- Issues found in the first run on real footage (#9).
+- Ingest ignores macOS `._*` AppleDouble files (#8).
+
+[Unreleased]: https://github.com/jchacker5/open-tesla-reality-view/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jchacker5/open-tesla-reality-view/releases/tag/v0.1.0

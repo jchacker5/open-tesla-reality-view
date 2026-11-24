@@ -56,3 +56,20 @@ usual paths, but check `git status` before you commit.
 - Keep PRs focused, and add or update tests for behaviour changes.
 - `ruff check`, `ruff format --check` and `pytest` must pass.
 - Describe how you tested it, and say whether you tested on real footage (don't attach the footage).
+- Branch from `main` as `feat/…`, `fix/…`, `docs/…` or `chore/…`. `main` is protected: CI has to
+  pass, and PRs are squash-merged.
+- Add a line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for anything a user would
+  notice.
+
+## Releases
+
+The project uses [Semantic Versioning](https://semver.org/). To cut a release:
+
+1. Move the `[Unreleased]` entries in `CHANGELOG.md` into a new `## [X.Y.Z] - YYYY-MM-DD` section.
+2. Set `version = "X.Y.Z"` in `pyproject.toml` and merge that PR.
+3. `git tag vX.Y.Z && git push origin vX.Y.Z`. The [release workflow](.github/workflows/release.yml)
+   checks the tag against `pyproject.toml`, runs the tests, builds the wheel and sdist, and publishes a
+   GitHub Release with that changelog section.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pipeline fits together and the full
+development lifecycle.

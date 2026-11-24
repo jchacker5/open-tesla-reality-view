@@ -12,6 +12,8 @@ never leaves your machine.
 
 [![CI](https://github.com/jchacker5/open-tesla-reality-view/actions/workflows/ci.yml/badge.svg)](https://github.com/jchacker5/open-tesla-reality-view/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d7bff)](LICENSE)
+[![CodeQL](https://github.com/jchacker5/open-tesla-reality-view/actions/workflows/codeql.yml/badge.svg)](https://github.com/jchacker5/open-tesla-reality-view/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/jchacker5/open-tesla-reality-view?color=3d7bff)](https://github.com/jchacker5/open-tesla-reality-view/releases)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-3ecf8e)](CONTRIBUTING.md)
 
 <img src="docs/media/hero.gif" alt="Chase-cam replay of a real drive rebuilt as a Gaussian splat from a Tesla's dashcam cameras: houses along the road, a car model on the reconstructed street, a blue path ribbon ahead, speed in the corner" width="760">
@@ -157,6 +159,9 @@ replay viewer still loads three.js/Spark from a CDN), so a city page can't reach
 | `work/<name>/` | A few GB per run (frames, masks, dense model, splat checkpoints). |
 
 ## How it works
+
+Architecture, design decisions, the data contract between stages and the test strategy are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```
 TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks · rig prior · pairs · telemetry

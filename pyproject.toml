@@ -16,7 +16,7 @@ enhance = [
   "diffusers==0.25.1",
   "transformers==4.38.0",
   "huggingface-hub==0.25.1",
-  "peft==0.9.0",
+  "peft==0.22.0",
   "einops",
   "accelerate",
   "opencv-python-headless>=4.8",
@@ -26,7 +26,7 @@ quality = ["torch>=2.3", "torchvision>=0.18", "lpips>=0.1.4", "transformers>=4.4
 # C++ core (cpp/): faster SEI decoding and the native splat renderer. Needs CMake 3.20+ and a C++20 compiler.
 native = ["otrv-native"]
 studio = [
-    "fastapi==0.162.1",
+    "fastapi==0.165.0",
     "uvicorn==0.54.0",
 ]
 

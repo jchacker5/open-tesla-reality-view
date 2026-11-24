@@ -87,7 +87,7 @@ Track make_track(double seconds, double noise_m, double outlier_rate, double gps
     tr.path.push_back({t, scene.from_enu(drive(t, straight))});
   }
   std::mt19937_64 rng(seed);
-  std::normal_distribution<double> n(0, noise_m);
+  std::normal_distribution<double> n(0, noise_m > 0 ? noise_m : 1.0);  // stddev must be > 0
   std::uniform_real_distribution<double> u(0, 1);
   geo::GpsSample last{};
   double next_update = 0;
@@ -95,7 +95,7 @@ Track make_track(double seconds, double noise_m, double outlier_rate, double gps
     const double t = i / 36.0;
     if (t >= next_update - 1e-9) {
       Vec3 e = drive(t, straight);
-      e[0] += n(rng), e[1] += n(rng);
+      if (noise_m > 0) e[0] += n(rng), e[1] += n(rng);
       if (u(rng) < outlier_rate) e[0] += 40, e[1] -= 25;
       const auto g = geo::from_enu(e, kOrigin);
       last = {t, g.lat_deg, g.lon_deg};

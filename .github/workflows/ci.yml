@@ -131,8 +131,8 @@ jobs:
         run: |
           uv run python -c "from pathlib import Path; from tsplat.studio import synth; synth.make_teslacam(Path('$RUNNER_TEMP/TeslaCam'), seconds=20)"
           echo "OTRV_PARITY_CLIP=$(ls "$RUNNER_TEMP"/TeslaCam/RecentClips/*-front.mp4 | head -1)" >> "$GITHUB_ENV"
-      - name: Parity with the Python decoder, GPS georeferencing
-        run: uv run pytest -q -rs tests/test_sei.py tests/test_sei_native.py tests/test_georef.py
+      - name: Parity (SEI decoder vs Python, renderer vs brute force), georef, snapshot
+        run: uv run pytest -q -rs tests/test_sei.py tests/test_sei_native.py tests/test_georef.py tests/test_render_native.py
         env:
           OTRV_REQUIRE_NATIVE: "1"
           OTRV_SEI_BIN: build/release/otrv-sei

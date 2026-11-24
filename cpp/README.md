@@ -8,8 +8,10 @@ automatically.
 |---|---|---|
 | `otrv/sei.hpp` | Tesla dashcam SEI telemetry: MP4 atom walk, AVCC NAL parsing, H.264 emulation-prevention removal, a protobuf wire-format decoder for `SeiMetadata` | `tsplat/sei.py` |
 | `otrv/geo.hpp` | Georeferencing: WGS84 / ECEF / ENU conversions and a robust fit of the reconstructed path to the car's GPS (metric scale, true north, map origin) | (new; `tsplat/georef.py` does the file I/O) |
+| `otrv/splat.hpp` | CPU Gaussian-splat renderer: PLY loader, the 3DGS forward pass (EWA projection, 16x16 tile binning, depth sort, front-to-back compositing, SH degree 0-3), multithreaded, plus a PNG writer | `otrv snapshot` (and a reference for Brush and the WebGL viewer) |
 | `otrv-sei` | CLI: a clip's telemetry as JSON (byte-identical to `python -m tsplat.sei`), or `--summary` | `python -m tsplat.sei` |
-| `otrv_native` | nanobind module; `tsplat.sei.extract` uses it when installed | |
+| `otrv-render` | CLI: render a PLY from a COLMAP view (`--colmap dense/sparse --image front/00036.jpg`) or a look-at camera | `otrv snapshot` |
+| `otrv_native` | nanobind module; `tsplat.sei.extract` uses it when installed, `otrv georef` and `otrv snapshot` need it | |
 
 ## Build
 
@@ -95,6 +97,48 @@ Tests: synthetic drives (a straight road and a 90° turn) under an arbitrary sim
 position within 2 m, the jumps are rejected, and each rejection path is exercised. Not yet
 run on real footage: the clips on this machine have no SEI telemetry, so the first real check is
 `otrv georef` on a drive recorded with firmware 2025.44.25+.
+
+## CPU splat renderer
+
+`otrv/splat.hpp` renders a trained scene with no GPU and no browser, so frames can be made over
+SSH, in CI, or on a machine without WebGL (`otrv snapshot drive1 --t 10 --cam chase`). It is the
+forward pass from the 3D Gaussian Splatting paper, the one Brush trains with and the viewer draws:
+
+1. **Project.** Each Gaussian's covariance `R S Sᵀ Rᵀ` goes to camera space and through the
+   Jacobian of the perspective projection at its mean (clamped to 1.3x the frustum, as 3DGS does,
+   so splats near the image edge don't blow up), plus a 0.3 px² low-pass on the 2D covariance.
+   Colour is spherical harmonics (degree 0-3, the 3DGS basis) along the camera-to-splat ray.
+2. **Bin and sort.** Each projected ellipse's 3σ bounding box marks the 16x16 tiles it touches. A
+   counting sort puts the (tile, splat) pairs into per-tile lists, then each tile is sorted by depth
+   in parallel (stable, so ties fall back to file order). The order matches one global sort on
+   (tile, depth, index), and so does the output.
+3. **Composite.** Each tile is a task: each pixel walks its tile's list front to back, alpha
+   `min(0.99, o·exp(-½ dᵀ Σ⁻¹ d))`, skipping contributions under 1/255 and stopping once
+   transmittance drops below 10⁻⁴.
+
+**Does it match Brush?** Brush saves its own renders of held-out views (`otrv recon --eval`). All 13
+held-out views of a trained run, re-rendered here from the same COLMAP cameras (`otrv-render
+--colmap`), against Brush's PNGs: SH degree 3, 826x530 and similar, every pixel covered.
+
+| | |
+|---|---|
+| PSNR vs Brush | 76.5-99.9 dB (mean 84.9) |
+| largest pixel difference | 1/255 (rounding) |
+| pixels off by more than 1/255 | 0 |
+
+`OTRV_BRUSH_EVAL_RUN=work/<run> pytest tests/test_render_native.py` repeats that check on any run
+trained with `--eval`. CI doesn't have a trained scene, so it checks the renderer against an
+independent brute-force numpy implementation of the same forward pass instead (every pixel against
+every splat, no tiles, float64): random scenes at SH degrees 0-3, odd image sizes with partial edge
+tiles, splats behind the camera. The C++ unit tests cover the closed form for one Gaussian,
+occlusion order, anisotropy and rotation, culling, view-dependent colour, `look_at`, PLY parsing
+(any property order and type, and its error cases), and that the output is bit-identical whatever
+the thread count.
+
+**Speed.** 1,000,000 splats (SH degree 3, a synthetic street) at 1280x720 on an M4 (10 cores):
+17 ms project, 59 ms bin and sort, 215 ms composite, about 0.3 s a frame; 2.2 s on one thread.
+That is slow next to a GPU, and it isn't meant to replace one. It's for frames where no GPU is
+available, and as a reference.
 
 ## Layout
 

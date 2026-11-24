@@ -48,10 +48,13 @@ public. [Follow the build thread](https://x.com/Joedefendre/status/2124615749792
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
   signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
-- **C++ core** ([cpp/](cpp/README.md)): a C++20 telemetry decoder and GPS georeferencing
-  (`otrv georef`: metric scale, true north and a map origin from the car's own GPS) with Python
-  bindings (nanobind), checked against the Python decoder on fuzzed input and run under
+- **C++ core** ([cpp/](cpp/README.md)), C++20 with Python bindings (nanobind), unit-tested under
   ASan/UBSan in CI. `uv sync --extra native` builds it; everything else works without it.
+  - a telemetry decoder, ~3x faster than the Python one and identical to it on fuzzed input;
+  - GPS georeferencing (`otrv georef`): metric scale, true north and a map origin from the car's
+    own GPS, cross-checked against the speedometer;
+  - a CPU splat renderer (`otrv snapshot`, `otrv-render`) that reproduces Brush's renders to within
+    1/255, for frames without a GPU or browser.
 - **Ready for generative view synthesis.** `otrv nvs-export` packages posed frames and the
   chase-cam path for diffusion novel-view models such as
   [ViewNeXt](https://phai-lab.github.io/ViewNext/).
@@ -179,6 +182,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `studio` | local web app over all of the above: sources, drives, window picking, a build queue with live progress, gallery ([docs/STUDIO.md](docs/STUDIO.md)) |
 | `georef` | fit the reconstructed path to the car's GPS (C++, `--extra native`): metric scale, true north and a map origin in `viewer/georef.json`, checked against the speed-derived scale |
+| `snapshot` | render one frame (chase, driver or drone camera at a time) to a PNG with the C++ CPU renderer: no browser or GPU |
 | `bench` | score a run (per-camera registration, reprojection, held-out PSNR, timings), gate it, log it to `work/ledger.jsonl`; see [docs/HILL_CLIMB.md](docs/HILL_CLIMB.md) |
 
 ## The viewer

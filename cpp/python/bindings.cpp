@@ -1,5 +1,6 @@
 // Python bindings (nanobind) for the otrv C++ core. Built by scikit-build-core as otrv_native._core.
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/tuple.h>
@@ -11,6 +12,7 @@
 
 #include "otrv/geo.hpp"
 #include "otrv/sei.hpp"
+#include "otrv/splat.hpp"
 
 namespace nb = nanobind;
 
@@ -76,6 +78,14 @@ nb::dict georef_to_py(const otrv::geo::Georef& g, const std::vector<otrv::geo::P
   }
   d["track"] = track;
   return d;
+}
+
+// Hands a vector to numpy without copying: the capsule owns it.
+template <std::size_t N>
+nb::ndarray<nb::numpy, float> to_numpy(std::vector<float>&& v, const std::array<std::size_t, N>& shape) {
+  auto* owned = new std::vector<float>(std::move(v));
+  nb::capsule del(owned, [](void* p) noexcept { delete static_cast<std::vector<float>*>(p); });
+  return nb::ndarray<nb::numpy, float>(owned->data(), N, shape.data(), del);
 }
 
 }  // namespace
@@ -148,4 +158,77 @@ NB_MODULE(_core, m) {
       nb::arg("path"), nb::arg("up"), nb::arg("gps"), nb::arg("inlier_m") = 3.0, nb::arg("max_gap_s") = 2.0,
       nb::arg("min_extent_m") = 15.0,
       "Fit a reconstructed path [(t, x, y, z)] to GPS [(t, lat, lon)]: metric scale, heading and origin.");
+
+  namespace sp = otrv::splat;
+  nb::class_<sp::Gaussians>(m, "Splats", "Gaussian splats loaded from a 3DGS / Brush PLY")
+      .def_prop_ro("size", &sp::Gaussians::size)
+      .def_ro("sh_degree", &sp::Gaussians::sh_degree)
+      .def("__len__", &sp::Gaussians::size);
+  m.def(
+      "load_splats",
+      [](const std::string& path) {
+        nb::gil_scoped_release release;
+        return sp::load_ply(path);
+      },
+      nb::arg("path"), "Load a binary little-endian 3DGS / Brush PLY.");
+  m.def(
+      "splats_from_arrays",
+      [](std::vector<float> position, std::vector<float> log_scale, std::vector<float> rotation,
+         std::vector<float> opacity, std::vector<float> sh, int sh_degree) {
+        const std::size_t n = opacity.size(), k = static_cast<std::size_t>((sh_degree + 1) * (sh_degree + 1));
+        if (sh_degree < 0 || sh_degree > 3 || position.size() != 3 * n || log_scale.size() != 3 * n ||
+            rotation.size() != 4 * n || sh.size() != 3 * k * n)
+          throw nb::value_error("array sizes don't match the number of splats and the SH degree");
+        sp::Gaussians g;
+        g.position = std::move(position);
+        g.log_scale = std::move(log_scale);
+        g.rotation = std::move(rotation);
+        g.opacity = std::move(opacity);
+        g.sh = std::move(sh);
+        g.sh_degree = sh_degree;
+        return g;
+      },
+      nb::arg("position"), nb::arg("log_scale"), nb::arg("rotation"), nb::arg("opacity"), nb::arg("sh"),
+      nb::arg("sh_degree"),
+      "Build splats from flat arrays (PLY layout: rotation w,x,y,z; opacity logit; sh coefficient-major RGB).");
+
+  nb::class_<sp::Camera>(m, "Camera", "Pinhole camera, COLMAP convention (x right, y down, z forward)")
+      .def(nb::init<>())
+      .def_rw("width", &sp::Camera::width)
+      .def_rw("height", &sp::Camera::height)
+      .def_rw("fx", &sp::Camera::fx)
+      .def_rw("fy", &sp::Camera::fy)
+      .def_rw("cx", &sp::Camera::cx)
+      .def_rw("cy", &sp::Camera::cy)
+      .def_rw("R", &sp::Camera::R, "world -> camera rotation (rows)")
+      .def_rw("t", &sp::Camera::t, "world -> camera translation")
+      .def_prop_ro("centre", &sp::Camera::centre)
+      .def_static("look_at", &sp::Camera::look_at, nb::arg("eye"), nb::arg("target"), nb::arg("up"),
+                  nb::arg("vertical_fov_deg"), nb::arg("width"), nb::arg("height"))
+      .def_static("from_colmap", &sp::Camera::from_colmap, nb::arg("qvec"), nb::arg("tvec"), nb::arg("width"),
+                  nb::arg("height"), nb::arg("fx"), nb::arg("fy"), nb::arg("cx"), nb::arg("cy"));
+
+  m.def(
+      "render",
+      [](const sp::Gaussians& g, const sp::Camera& cam, std::array<float, 3> background, int threads) {
+        sp::RenderOptions o;
+        o.background = background;
+        o.threads = threads;
+        sp::Image img;
+        sp::RenderStats st;
+        {
+          nb::gil_scoped_release release;
+          img = sp::render(g, cam, o, &st);
+        }
+        const auto h = static_cast<std::size_t>(img.height), w = static_cast<std::size_t>(img.width);
+        nb::dict stats;
+        stats["visible"] = st.visible;
+        stats["tile_hits"] = st.tile_hits;
+        stats["ms"] = st.project_ms + st.sort_ms + st.raster_ms;
+        return nb::make_tuple(to_numpy<3>(std::move(img.rgb), {h, w, 3}), to_numpy<2>(std::move(img.alpha), {h, w}),
+                              stats);
+      },
+      nb::arg("splats"), nb::arg("camera"), nb::arg("background") = std::array<float, 3>{0, 0, 0},
+      nb::arg("threads") = 0,
+      "Render on the CPU. Returns (rgb float32 HxWx3, alpha float32 HxW, stats). Same output as Brush.");
 }

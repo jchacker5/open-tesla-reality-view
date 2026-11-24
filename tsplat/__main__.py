@@ -48,6 +48,7 @@ from . import (
     render,
     serve,
     sky,
+    snapshot,
     speed,
 )
 
@@ -388,6 +389,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("name", help="run name")
     a.add_argument("--inlier-m", type=float, default=3.0, help="RANSAC inlier threshold, metres")
+
+    a = cmd(
+        "snapshot",
+        "render one frame of a reconstruction to a PNG on the CPU, no browser or GPU (C++ renderer; needs "
+        "`uv sync --extra native`)",
+    )
+    a.add_argument("name", help="run name")
+    a.add_argument("--t", type=float, default=0.0, help="seconds into the window")
+    a.add_argument("--cam", default="chase", choices=snapshot.VIEWS, help="camera, framed like the viewer's")
+    a.add_argument("--size", default="1280x720", help="WIDTHxHEIGHT")
+    a.add_argument("-o", "--out", type=Path, help="output PNG (default: work/<name>/snapshot_<cam>_<t>s.png)")
 
     a = cmd("bench", "score a reconstruction, gate it, append it to work/ledger.jsonl (seconds)")
     a.add_argument("name", help="run name")
@@ -754,6 +766,12 @@ def dispatch(args) -> None:
         collision.run(need_recon(args.name, "viewer/scene.ply", "viewer/path.json"))
     elif c == "georef":
         georef.run(need_recon(args.name, "viewer/path.json", "viewer/telemetry.json"), args.inlier_m)
+    elif c == "snapshot":
+        try:
+            w, h = (int(v) for v in args.size.lower().split("x"))
+        except ValueError:
+            raise SystemExit(f"--size must look like 1280x720, not {args.size}") from None
+        snapshot.run(need_recon(args.name, "viewer/scene.ply", "viewer/path.json"), args.t, args.cam, args.out, w, h)
     elif c == "bench":
         work = need_prep(args.name)
         if not recon_attempted(work):

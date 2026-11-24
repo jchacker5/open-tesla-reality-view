@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "otrv-native"
 version = "0.1.0"
-description = "C++ core of Open Tesla Reality View: SEI telemetry decoder and Gaussian-splat renderer"
+description = "C++ core of Open Tesla Reality View: SEI telemetry decoder, GPS georeferencing, Gaussian-splat renderer"
 requires-python = ">=3.11"
 license = "MIT"
 readme = "README.md"

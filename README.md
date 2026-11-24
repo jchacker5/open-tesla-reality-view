@@ -47,9 +47,10 @@ public. [Follow the build thread](https://x.com/Joedefendre/status/2124615749792
   drive mode where you take the wheel inside the reconstruction (keyboard, gamepad or touch).
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
-  signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
+  signals, Autopilot state, GPS. No protobuf dependency: the decoder is pure Python, or C++ when
+  the native extension is installed.
 - **C++ core** ([cpp/](cpp/README.md)), C++20 with Python bindings (nanobind), unit-tested under
-  ASan/UBSan in CI. `uv sync --extra native` builds it; everything else works without it.
+  ASan/UBSan in CI. `uv sync --extra native` builds it; the rest of the pipeline works without it.
   - a telemetry decoder, ~3x faster than the Python one and identical to it on fuzzed input;
   - GPS georeferencing (`otrv georef`): metric scale, true north and a map origin from the car's
     own GPS, cross-checked against the speedometer;

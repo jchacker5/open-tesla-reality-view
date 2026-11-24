@@ -3,11 +3,16 @@
 Port of teslamotors/dashcam sei_extractor.py with a tiny built-in protobuf decoder,
 so no protoc / protobuf dependency is needed. Field numbers follow dashcam.proto.
 Requires firmware 2025.44.25+ on HW3/HW4; parked clips may have no SEI.
+
+`extract` uses the C++ decoder in `otrv_native` (cpp/, `uv sync --extra native`) when it is
+installed and falls back to this pure-Python one otherwise. Both apply the same rules to the same
+bytes; tests/test_sei_native.py checks that on fuzzed input. Set OTRV_NATIVE=0 to force Python.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -42,6 +47,8 @@ def _varint(buf: bytes, i: int) -> tuple[int, int]:
         i += 1
         result |= (b & 0x7F) << shift
         if not b & 0x80:
+            if result >> 64:
+                raise ValueError("varint exceeds 64 bits")
             return result, i
         shift += 7
         if shift > 63:
@@ -108,7 +115,10 @@ def _find_mdat(fp) -> tuple[int, int]:
             raise RuntimeError("mdat atom not found")
         size32, typ = struct.unpack(">I4s", hdr)
         if size32 == 1:
-            size, hsize = struct.unpack(">Q", fp.read(8))[0], 16
+            ext = fp.read(8)
+            if len(ext) < 8:
+                raise RuntimeError("truncated MP4 atom header")
+            size, hsize = struct.unpack(">Q", ext)[0], 16
         else:
             size, hsize = size32, 8
         if typ == b"mdat":
@@ -118,7 +128,30 @@ def _find_mdat(fp) -> tuple[int, int]:
         fp.seek(size - hsize, 1)
 
 
+def _label(table: list[str], value) -> str:
+    """Enum name for a decoded value; "?" if it is out of range or not an integer (a missing field is 0)."""
+    return table[value] if isinstance(value, int) and 0 <= value < len(table) else "?"
+
+
+try:
+    from otrv_native import sei_extract as _native_extract
+except ImportError:  # the C++ extension is optional
+    _native_extract = None
+
+
+def native_available() -> bool:
+    return _native_extract is not None
+
+
 def extract(path: str | Path) -> list[dict]:
+    """One dict per SEI telemetry message in the clip, in file order."""
+    if _native_extract is not None and os.environ.get("OTRV_NATIVE", "1") != "0":
+        return _native_extract(str(path))
+    return extract_py(path)
+
+
+def extract_py(path: str | Path) -> list[dict]:
+    """Pure-Python reference decoder."""
     rows = []
     with open(path, "rb") as fp:
         off, size = _find_mdat(fp)
@@ -144,10 +177,8 @@ def extract(path: str | Path) -> list[dict]:
             p = _payload(two + rest)
             meta = decode_proto(p) if p else None
             if meta and "frame_seq_no" in meta:
-                meta["gear"] = GEARS[meta.get("gear_state", 0)] if meta.get("gear_state", 0) < 4 else "?"
-                meta["autopilot"] = (
-                    AUTOPILOT[meta.get("autopilot_state", 0)] if meta.get("autopilot_state", 0) < 4 else "?"
-                )
+                meta["gear"] = _label(GEARS, meta.get("gear_state", 0))
+                meta["autopilot"] = _label(AUTOPILOT, meta.get("autopilot_state", 0))
                 rows.append(meta)
     return rows
 

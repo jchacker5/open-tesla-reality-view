@@ -23,6 +23,8 @@ enhance = [
 ]
 # Bench v2 LPIPS, Depth Anything V2 dense init, the sky segmentation model: ~1 GB (PyTorch).
 quality = ["torch>=2.3", "torchvision>=0.18", "lpips>=0.1.4", "transformers>=4.45"]
+# C++ core (cpp/): faster SEI decoding and the native splat renderer. Needs CMake 3.20+ and a C++20 compiler.
+native = ["otrv-native"]
 studio = [
     "fastapi==0.162.1",
     "uvicorn==0.54.0",
@@ -38,6 +40,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+
+[tool.uv.sources]
+otrv-native = { path = "cpp" }
 
 # Difix pins transformers 4.38; bench v2 needs transformers 4.45+. Install one extra at a time.
 [tool.uv]

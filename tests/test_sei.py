@@ -95,3 +95,25 @@ def test_strip_epb():
 @pytest.mark.parametrize("buf", [b"", b"\xff\xff\xff", b"\x0b", b"\x25\x01\x02", b"\x1f\x00"])
 def test_decode_proto_garbage(buf):
     assert sei.decode_proto(buf) is None
+
+
+def test_varint_over_64_bits_is_rejected():
+    assert sei.decode_proto(key(3, 0) + varint(2**64 - 1))["frame_seq_no"] == 2**64 - 1
+    assert sei.decode_proto(key(3, 0) + b"\xff" * 9 + b"\x02") is None  # 2**64 + ...
+    assert sei.decode_proto(key(3, 0) + b"\x80" * 10 + b"\x00") is None  # 11 bytes
+
+
+def test_enum_labels_tolerate_odd_values(tmp_path):
+    base = key(3, 0) + varint(1)
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(mp4(sei_nal(base + key(2, 0) + varint(9) + key(10, 0) + varint(3))))
+    assert [(r["gear"], r["autopilot"]) for r in sei.extract_py(f)] == [("?", "TACC")]
+    f.write_bytes(mp4(sei_nal(base + key(2, 1) + struct.pack("<d", 1.0))))  # gear sent as a double
+    assert sei.extract_py(f)[0]["gear"] == "?"
+
+
+def test_truncated_64bit_atom_header_raises(tmp_path):
+    f = tmp_path / "x.mp4"
+    f.write_bytes(struct.pack(">I4s", 1, b"mdat") + b"\x00\x00")
+    with pytest.raises(RuntimeError):
+        sei.extract_py(f)

@@ -48,6 +48,9 @@ public. [Follow the build thread](https://x.com/Joedefendre/status/2124615749792
 - **Telemetry** decoded from the SEI metadata in every clip (firmware 2025.44.25+), following
   [teslamotors/dashcam](https://github.com/teslamotors/dashcam): speed, gear, steering, brake, turn
   signals, Autopilot state, GPS. The decoder is pure Python, with no protobuf dependency.
+- **C++ core** ([cpp/](cpp/README.md)): a C++20 telemetry decoder with Python bindings (nanobind),
+  checked against the Python decoder on fuzzed input and run under ASan/UBSan in CI. `uv sync
+  --extra native` builds it; everything works without it.
 - **Ready for generative view synthesis.** `otrv nvs-export` packages posed frames and the
   chase-cam path for diffusion novel-view models such as
   [ViewNeXt](https://phai-lab.github.io/ViewNext/).

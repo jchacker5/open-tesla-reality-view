@@ -1,11 +1,15 @@
 // Python bindings (nanobind) for the otrv C++ core. Built by scikit-build-core as otrv_native._core.
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
 
 #include <exception>
 #include <system_error>
 #include <variant>
 
+#include "otrv/geo.hpp"
 #include "otrv/sei.hpp"
 
 namespace nb = nanobind;
@@ -48,6 +52,30 @@ nb::list frames_to_py(const std::vector<otrv::sei::Frame>& frames) {
     out.append(d);
   }
   return out;
+}
+
+nb::dict georef_to_py(const otrv::geo::Georef& g, const std::vector<otrv::geo::PathSample>& path) {
+  nb::dict d;
+  d["ok"] = g.ok;
+  d["reason"] = g.reason;
+  d["matched"] = g.matched;
+  d["inliers"] = g.inliers;
+  d["extent_m"] = g.extent_m;
+  if (!g.ok) return d;
+  d["origin"] = nb::make_tuple(g.origin.lat_deg, g.origin.lon_deg);
+  d["metres_per_unit"] = g.scale;
+  d["yaw_deg"] = g.yaw_rad * 180.0 / 3.14159265358979323846;
+  d["translation"] = g.translation;
+  d["matrix"] = g.matrix;
+  d["rms_m"] = g.rms_m;
+  d["max_m"] = g.max_m;
+  nb::list track;  // where the reconstruction puts each path sample on the map
+  for (const auto& s : path) {
+    const auto geo = g.to_geodetic(s.p);
+    track.append(nb::make_tuple(s.t, geo.lat_deg, geo.lon_deg));
+  }
+  d["track"] = track;
+  return d;
 }
 
 }  // namespace
@@ -94,4 +122,30 @@ NB_MODULE(_core, m) {
         return fields_to_py(*frame);
       },
       nb::arg("data"), "Decode one SeiMetadata protobuf. Same output as tsplat.sei.decode_proto.");
+
+  m.def(
+      "geo_fit",
+      [](const std::vector<std::tuple<double, double, double, double>>& path, const otrv::geo::Vec3& up,
+         const std::vector<std::tuple<double, double, double>>& gps, double inlier_m, double max_gap_s,
+         double min_extent_m) {
+        std::vector<otrv::geo::PathSample> p;
+        p.reserve(path.size());
+        for (const auto& [t, x, y, z] : path) p.push_back({t, {x, y, z}});
+        std::vector<otrv::geo::GpsSample> g;
+        g.reserve(gps.size());
+        for (const auto& [t, lat, lon] : gps) g.push_back({t, lat, lon});
+        otrv::geo::FitOptions o;
+        o.inlier_m = inlier_m;
+        o.max_gap_s = max_gap_s;
+        o.min_extent_m = min_extent_m;
+        otrv::geo::Georef r;
+        {
+          nb::gil_scoped_release release;
+          r = otrv::geo::fit(p, up, g, o);
+        }
+        return georef_to_py(r, p);
+      },
+      nb::arg("path"), nb::arg("up"), nb::arg("gps"), nb::arg("inlier_m") = 3.0, nb::arg("max_gap_s") = 2.0,
+      nb::arg("min_extent_m") = 15.0,
+      "Fit a reconstructed path [(t, x, y, z)] to GPS [(t, lat, lon)]: metric scale, heading and origin.");
 }

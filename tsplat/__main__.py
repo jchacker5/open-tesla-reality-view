@@ -677,6 +677,7 @@ def cmd_render(args) -> None:
     if not 0 <= args.stabilize_strength <= 1:
         raise SystemExit("--stabilize-strength must be between 0 and 1")
     page = Path(args.viewer_html).read_bytes() if args.viewer_html else viewer_html().read_bytes()
+    install_viewer(work / "viewer")  # car.js, the user's car model and features.json, as `otrv view` does
     opts = render.Options(
         out=Path(args.out) if args.out else work / "render.mp4",
         fps=args.fps,

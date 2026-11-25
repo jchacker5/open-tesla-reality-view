@@ -264,6 +264,17 @@ def test_render_flags_reach_options(work, monkeypatch):
     _run("render", "a", "--clean-cache", "--keep-frames")  # mutually exclusive: argparse exits
 
 
+def test_render_installs_viewer_modules(work, monkeypatch, tmp_path):
+    """A fresh recon has no car.js or features.json in viewer/; render installs them like `otrv view`."""
+    monkeypatch.setenv("OTRV_MODELS", str(tmp_path / "no-models"))
+    monkeypatch.setattr(render, "run", lambda w, page, opts: None)
+    vd = work / "viewer"
+    assert not (vd / "car.js").exists()
+    cli.main(["render", "a"])
+    assert (vd / "car.js").read_bytes() == cli.viewer_file("car.js").read_bytes()
+    assert json.loads((vd / "features.json").read_text())["model"] is False
+
+
 # ---- the real capture loop against a fake viewer page -----------------------------------------------
 
 FAKE_VIEWER = b"""<!doctype html><html><body style="margin:0;background:#fff">

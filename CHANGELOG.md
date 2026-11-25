@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `otrv render --enhance` failed at model load after a Dependabot bump of `peft` (0.9.0 -> 0.22.0,
+  which needs transformers 5.6+). The Difix pins are restored, Dependabot ignores them, and a test
+  guards them.
+
 ## [0.1.0] - 2026-11-23
 
 First public release.

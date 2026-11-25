@@ -80,6 +80,12 @@ uv run otrv render drive1 --aspect 1:1 --cam drone --start 4 --end 10 \
 
 ## AI enhancement with NVIDIA Difix
 
+![Left: the raw splat. Right: the same frame with --enhance difix](media/render-difix.gif)
+
+*The same chase-cam frames, raw (left) and with `--enhance difix` (right), from a low-resolution 6-camera
+clip (456 px front camera). Difix removes the fog and smears but also invents structure, such as the
+glass-like shards here, which is why enhanced renders are labelled.*
+
 [Difix](https://github.com/nv-tlabs/Difix3D) (NVIDIA, CVPR 2025) is a single-step image diffusion
 model trained to remove the artifacts of neural reconstructions. Each frame is resized to 1024 px
 wide (a multiple of 8), run once with the prompt "remove degradation" at timestep 199, and

@@ -9,7 +9,7 @@
     "render:demo": "remotion render src/index.ts RenderDemo out/render-demo.mp4 --codec h264 --crf 20",
     "render:short": "remotion render src/index.ts RenderShort out/render-short.mp4 --codec h264 --crf 20",
     "render:stack": "remotion render src/index.ts StackClip out/stack-clip.mp4 --codec h264 --crf 20",
-    "render:loop": "remotion render src/index.ts DroneLoop out/drone-loop.mp4 --codec h264 --crf 20",
+    "render:loop": "remotion render src/index.ts ChaseLoop out/chase-loop.mp4 --codec h264 --crf 20",
     "render:compare": "remotion render src/index.ts CompareGif out/compare.mp4 --codec h264 --crf 20"
   },
   "dependencies": {

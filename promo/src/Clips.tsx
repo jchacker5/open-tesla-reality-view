@@ -1,7 +1,7 @@
 // Social cuts around `otrv render`, using the same footage as RenderDemo (public/render/*.mp4):
 //   RenderShort  1080x1920  raw on top, Difix below, in sync: the phone-timeline version
 //   StackClip    1920x1080  how it works, with the measured numbers from the demo run
-//   DroneLoop    1080x1080  seamless drone loop (source for the GIF)
+//   ChaseLoop    1080x1080  seamless chase-cam loop (source for the GIF)
 // Numbers in StackClip come from that run (`otrv bench demo`, Apple M4 32 GB) and cpp/README.md.
 import { Video } from "@remotion/media";
 import { linearTiming, TransitionSeries } from "@remotion/transitions";
@@ -189,7 +189,7 @@ const StackLessons: React.FC = () => {
 const StackEnd: React.FC = () => (
   <AbsoluteFill style={{ background: C.bg }}>
     <AbsoluteFill style={{ opacity: 0.35 }}>
-      <Video src={staticFile("render/drone.mp4")} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      <Video src={staticFile("render/difix.mp4")} muted trimBefore={60} style={{ position: "absolute", width: 1920, height: 1080 }} />
     </AbsoluteFill>
     <AbsoluteFill style={{ background: "radial-gradient(ellipse at center, rgba(7,8,10,.35), rgba(7,8,10,.95) 75%)" }} />
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", textAlign: "center" }}>
@@ -215,27 +215,28 @@ const STACK: [number, React.FC][] = [
 export const STACK_FRAMES = total(STACK.map(([d]) => d));
 export const StackClip: React.FC = () => series(STACK);
 
-// ---- DroneLoop (1:1) ---------------------------------------------------------------------------
+// ---- ChaseLoop (1:1) ---------------------------------------------------------------------------
 // The first and last 12 frames cross-fade, so the GIF loops without a jump.
 
 export const LOOP_FRAMES = 180;
-export const DroneLoop: React.FC = () => {
+export const ChaseLoop: React.FC = () => {
   const f = useCurrentFrame();
   const { durationInFrames } = useVideoConfig();
   const X = 12;
   const tail = interpolate(f, [durationInFrames - X, durationInFrames], [0, 1], clamp);
-  const vid: React.CSSProperties = { width: "100%", height: "100%", objectFit: "cover" };
+  const w = (1080 * 16) / 9;
+  const vid: React.CSSProperties = { position: "absolute", height: 1080, width: w, left: (1080 - w) / 2, top: 0 };
   return (
     <AbsoluteFill style={{ background: C.bg }}>
       {/* source frames X..X+duration, then source frames 0..X fade in over the end: last frame = first */}
-      <Video src={staticFile("render/drone.mp4")} muted trimBefore={X} style={vid} />
+      <Video src={staticFile("render/difix.mp4")} muted trimBefore={X} style={vid} />
       <Sequence from={durationInFrames - X}>
         <AbsoluteFill style={{ opacity: tail }}>
-          <Video src={staticFile("render/drone.mp4")} muted style={vid} />
+          <Video src={staticFile("render/difix.mp4")} muted style={vid} />
         </AbsoluteFill>
       </Sequence>
       <div style={{ position: "absolute", left: 48, bottom: 44, fontFamily: mono, fontSize: 30, color: C.text, background: "rgba(7,8,10,.7)", borderRadius: 10, padding: "10px 18px" }}>
-        otrv render --cam drone
+        otrv render --enhance difix
       </div>
     </AbsoluteFill>
   );

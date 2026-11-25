@@ -2,7 +2,6 @@
 // regenerate it for your own run <name>):
 //   otrv render <name> --start 0 --end 10 --keep-frames --out promo/public/render/raw.mp4
 //   otrv render <name> --start 0 --end 10 --enhance difix --accept-nvidia-license --out promo/public/render/difix.mp4
-//   otrv render <name> --cam drone --start 0 --end 8 --enhance difix --accept-nvidia-license --out promo/public/render/drone.mp4
 // raw.mp4 and difix.mp4 must cover the same window: Compare plays them frame-synced.
 import { loadFont as loadInter } from "@remotion/google-fonts/Inter";
 import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
@@ -19,7 +18,7 @@ export const C = { bg: "#07080a", text: "#eef0f4", dim: "#8a909c", accent: "#3d7
 export const RENDER_FPS = 30;
 const T = 15;
 
-const SCENES = { title: 90, command: 105, compare: 255, chase: 180, drone: 150, cta: 120 };
+const SCENES = { title: 90, command: 105, compare: 255, chase: 180, cta: 120 };
 export const RENDER_FRAMES =
   Object.values(SCENES).reduce((a, b) => a + b, 0) - T * (Object.keys(SCENES).length - 1);
 
@@ -102,7 +101,7 @@ const Command: React.FC = () => {
   const f = useCurrentFrame();
   const typed = CMD.slice(0, Math.max(0, Math.floor((f - 6) / 1.4)));
   const done = typed.length === CMD.length;
-  const lines = ["capturing 600 frames in headless Chromium (Metal)", "Difix clean-up on the Apple GPU (MPS, fp16)", "flow-guided anti-flicker", "encoding H.264 1080p"];
+  const lines = ["capturing 300 frames in headless Chromium (Metal)", "Difix clean-up on the Apple GPU (MPS, fp16)", "flow-guided anti-flicker", "encoding H.264 1080p"];
   return (
     <AbsoluteFill style={{ background: C.bg, padding: "0 120px", justifyContent: "center" }}>
       <Kicker>one command</Kicker>
@@ -151,17 +150,9 @@ const Compare: React.FC = () => {
 
 const Chase: React.FC = () => (
   <AbsoluteFill style={{ background: C.bg }}>
-    <Clip src="render/difix.mp4" zoom={[1.0, 1.04]} />
+    <Clip src="render/difix.mp4" zoom={[1.0, 1.04]} trim={105} />
     <Shade />
-    <Caption kicker="--cam chase" title="A chase cam that never existed." sub="Six car cameras, solved as one rig, trained into a Gaussian splat on your Mac." />
-  </AbsoluteFill>
-);
-
-const Drone: React.FC = () => (
-  <AbsoluteFill style={{ background: C.bg }}>
-    <Clip src="render/drone.mp4" zoom={[1.0, 1.06]} />
-    <Shade />
-    <Caption kicker="--cam drone" title="Or fly above it." sub="16:9, 9:16 and 1:1 · chase, driver, drone and free cameras." />
+    <Caption kicker="--cam chase" title="A chase cam that never existed." sub="Six car cameras, one rigid rig, a Gaussian splat trained on your Mac. Chase, driver, drone or free cam." />
   </AbsoluteFill>
 );
 
@@ -190,7 +181,6 @@ export const RenderDemo: React.FC = () => {
     ["command", Command],
     ["compare", Compare],
     ["chase", Chase],
-    ["drone", Drone],
     ["cta", Cta],
   ];
   return (

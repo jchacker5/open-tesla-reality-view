@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `otrv render` on a fresh reconstruction stopped with "car.js is missing": it now installs the
+  viewer modules, car model and `features.json` the same way `otrv view` does.
+
 ## [0.1.0] - 2026-11-23
 
 First public release.

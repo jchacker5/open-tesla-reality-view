@@ -16,7 +16,7 @@ enhance = [
   "diffusers==0.25.1",
   "transformers==4.38.0",
   "huggingface-hub==0.25.1",
-  "peft==0.22.0",
+  "peft==0.9.0",
   "einops",
   "accelerate",
   "opencv-python-headless>=4.8",

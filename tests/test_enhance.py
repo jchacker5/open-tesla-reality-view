@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -285,3 +286,15 @@ def test_farneback_translation():
     b = np.roll(a, 2, axis=1)  # content moves 2 px right
     f = enhance.farneback(a, b)
     assert abs(np.median(f[8:-8, 8:-8, 0]) - 2) < 0.5 and abs(np.median(f[8:-8, 8:-8, 1])) < 0.5
+
+
+def test_enhance_extra_keeps_the_difix_release_pins():
+    """Difix only runs on the library versions it was released against; a bump (e.g. peft 0.22, which
+    needs transformers 5.6+) breaks `otrv render --enhance` at model load, which CI can't install."""
+    import tomllib
+
+    extra = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())["project"][
+        "optional-dependencies"
+    ]
+    pins = {d.split("==")[0]: d.split("==")[1] for d in extra["enhance"] if "==" in d}
+    assert pins == {"diffusers": "0.25.1", "transformers": "4.38.0", "huggingface-hub": "0.25.1", "peft": "0.9.0"}

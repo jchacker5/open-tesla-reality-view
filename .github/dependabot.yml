@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The `enhance` extra is pinned to the versions NVIDIA Difix was released against; newer ones break
+    # it (peft 0.22 needs transformers 5.6+, Difix needs 4.38). tests/test_enhance.py checks the pins.
+    ignore:
+      - dependency-name: diffusers
+      - dependency-name: transformers
+      - dependency-name: huggingface-hub
+      - dependency-name: peft
     groups:
       python-minor:
         update-types: [minor, patch]

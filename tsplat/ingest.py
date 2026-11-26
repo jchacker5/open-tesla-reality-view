@@ -68,15 +68,23 @@ def select_files(src: Path, kinds: tuple[str, ...] = DEFAULT_KINDS, since: dt.da
 
 
 def bytes_to_copy(src: Path, dest: Path, files: list[Path]) -> tuple[int, int]:
-    """(total bytes, bytes not already at dest with the same size)."""
+    """(total bytes, bytes whose size or modification time differs at dest)."""
     total = new = 0
     for rel in files:
         size = (src / rel).stat().st_size
         total += size
         out = dest / rel
-        if not (out.exists() and out.stat().st_size == size):
+        if not _same_file_version(src / rel, out):
             new += size
     return total, new
+
+
+def _same_file_version(source: Path, target: Path) -> bool:
+    try:
+        before, after = source.stat(), target.stat()
+    except FileNotFoundError:
+        return False
+    return (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
 
 
 def free_bytes(path: Path) -> int:
@@ -126,9 +134,16 @@ def copy(src: Path, dest: Path, files: list[Path]) -> None:
         return
     for i, rel in enumerate(files, 1):
         out = dest / rel
-        if not out.exists() or out.stat().st_size != (src / rel).stat().st_size:
+        if not _same_file_version(src / rel, out):
             out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / rel, out)
+            # A cancelled copy must leave either the old complete file or the new complete file.
+            with tempfile.NamedTemporaryFile(dir=out.parent, prefix=f".{out.name}.", delete=False) as tmp:
+                staging = Path(tmp.name)
+            try:
+                shutil.copy2(src / rel, staging)
+                staging.replace(out)
+            finally:
+                staging.unlink(missing_ok=True)
         if i % 50 == 0 or i == len(files):
             print(f"  {i}/{len(files)} files", flush=True)
 
@@ -186,13 +201,20 @@ def build_index(root: Path, with_speed: bool = True) -> list[dict]:
             "event": event,
         }
         if with_speed and front:
-            size = front.stat().st_size
+            stat = front.stat()
+            size, mtime_ns = stat.st_size, stat.st_mtime_ns
             old = prev.get(cid, {})
-            if old.get("cams", {}).get("front") == str(front) and old.get("front_bytes") == size and "mph" in old:
-                clip |= {"mph": old["mph"], "mph_1hz": old.get("mph_1hz"), "front_bytes": size}
+            clip |= {"front_bytes": size, "front_mtime_ns": mtime_ns}
+            if (
+                old.get("cams", {}).get("front") == str(front)
+                and old.get("front_bytes") == size
+                and old.get("front_mtime_ns") == mtime_ns
+                and "mph" in old
+            ):
+                clip |= {"mph": old["mph"], "mph_1hz": old.get("mph_1hz")}
             else:
                 s = speed.clip_speed(str(front), clip["seconds"])
-                clip |= {"mph": s and s["mean_mph"], "mph_1hz": s and s["mph_1hz"], "front_bytes": size}
+                clip |= {"mph": s and s["mean_mph"], "mph_1hz": s and s["mph_1hz"]}
         clips.append(clip)
     return clips
 

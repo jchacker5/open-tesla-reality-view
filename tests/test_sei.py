@@ -117,3 +117,22 @@ def test_truncated_64bit_atom_header_raises(tmp_path):
     f.write_bytes(struct.pack(">I4s", 1, b"mdat") + b"\x00\x00")
     with pytest.raises(RuntimeError):
         sei.extract_py(f)
+
+
+@pytest.mark.parametrize("payload_size", [0, 2, 4, 12])
+def test_nal_reads_stop_at_mdat_boundary(tmp_path, payload_size):
+    nal = sei_nal(key(3, 0) + varint(7))
+    data = struct.pack(">I", len(nal)) + nal
+    # Bytes after the declared mdat must never complete a NAL or become extra telemetry.
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(struct.pack(">I4s", 8 + payload_size, b"mdat") + data)
+    assert sei.extract_py(f) == []
+    assert sei.extract(f) == []
+
+
+def test_zero_sized_mdat_still_extends_to_eof(tmp_path):
+    nal = sei_nal(key(3, 0) + varint(7))
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(struct.pack(">I4sI", 0, b"mdat", len(nal)) + nal)
+    assert sei.extract_py(f)[0]["frame_seq_no"] == 7
+    assert sei.extract(f) == sei.extract_py(f)

@@ -264,9 +264,28 @@ Want one of these? Comment on its issue or open a draft PR. See [CONTRIBUTING.md
 
 ## Privacy
 
-Dashcam footage contains GPS traces, licence plates, faces and where you live. This tool runs
-locally and never uploads anything. `data/`, `work/`, footage and splats are git-ignored. If you
-share a replay, consider what's in it.
+Dashcam footage contains GPS traces, licence plates, faces and where you live. Processing stays
+local; the tool does not upload your footage or reconstruction. The viewer fetches three.js and
+Spark from jsDelivr. The optional map is off by default: enabling it sends tile requests to Esri,
+which reveal the drive's approximate location. The first toggle shows a notice, and `?map=0`
+forces tiles off even when a previous choice was saved. `data/`, `work/`, footage and splats are
+git-ignored. If you share a replay, consider what's in it.
+
+### Scale and validation
+
+`path.json` records `scaleSource` alongside `metresPerUnit`. `telemetry` means scale was estimated
+from integrated vehicle speed over the registered path. Without telemetry, `assumed-speed` uses
+11 m/s only to make the camera view usable; short or unusable telemetry uses
+`default-insufficient-telemetry`. These fallback scales are not measurements. The viewer labels
+them **estimated scale**. Stationary or degenerate camera paths fail with a clear message instead
+of exporting invalid headings or nonfinite JSON.
+
+The Python suite covers ingestion, telemetry, reconstruction and the studio; native tests cover
+malformed PLY/MP4 inputs, numeric extremes and exception-safe worker shutdown. Run
+`uv run pytest -q`, then configure `cpp/` with `-DOTRV_SANITIZE=ON -DOTRV_WERROR=ON` and run CTest.
+The native CI runs AddressSanitizer, UndefinedBehaviorSanitizer and floating-point conversion checks,
+plus Python/native parser and renderer parity tests. No test suite proves arbitrary footage or
+every GPU driver correct; reconstruction quality still depends on the input and training run.
 
 ## Credits
 

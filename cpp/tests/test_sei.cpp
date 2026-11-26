@@ -262,6 +262,15 @@ TEST_CASE("MP4 container handling") {
     append(f, be32(static_cast<std::uint32_t>(nal.size()))), append(f, nal);
     CHECK(sei::extract(f).size() == 2);
   }
+  SUBCASE("empty and truncated mdat never consume following bytes") {
+    for (const std::uint32_t payload_size : {0u, 2u, 4u, 12u}) {
+      Bytes f = be32(8 + payload_size);
+      append(f, Bytes{'m', 'd', 'a', 't'});
+      append(f, be32(static_cast<std::uint32_t>(nal.size())));
+      append(f, nal);
+      CHECK(sei::extract(f).empty());
+    }
+  }
   SUBCASE("tiny NAL lengths and a NAL cut off by EOF") {
     Bytes f = mp4({Bytes{0x06}, nal});
     f.resize(f.size() - 3);

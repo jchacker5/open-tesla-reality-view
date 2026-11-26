@@ -251,7 +251,7 @@ std::vector<Frame> extract_from(Source& src) {
   // Find the top-level mdat atom.
   std::uint64_t pos = 0;
   std::uint64_t mdat_start = 0;
-  std::uint64_t mdat_size = 0;  // 0 = runs to the end of the file
+  std::uint64_t mdat_size = 0;
   for (;;) {
     if (src.read(pos, 8, hdr) < 8) throw Mp4Error("mdat atom not found");
     pos += 8;
@@ -268,12 +268,13 @@ std::vector<Frame> extract_from(Source& src) {
     if (is_mdat) {
       if (size != 0 && size < header) return {};  // an mdat smaller than its own header holds nothing
       mdat_start = pos;
-      mdat_size = size != 0 ? size - header : 0;
+      const std::uint64_t remaining = src.size() - pos;
+      mdat_size = size != 0 ? std::min(size - header, remaining) : remaining;
       break;
     }
     if (size < header) throw Mp4Error("invalid MP4 atom size");
     const std::uint64_t skip = size - header;
-    pos = skip > src.size() ? src.size() + 1 : pos + skip;  // saturate; the next read then fails
+    pos += std::min(skip, src.size() - pos);  // saturate; the next read then fails
   }
 
   // Walk the length-prefixed (AVCC) NAL units.
@@ -281,26 +282,26 @@ std::vector<Frame> extract_from(Source& src) {
   std::vector<std::uint8_t> nal;
   std::uint64_t at = mdat_start;
   std::uint64_t used = 0;
-  const auto advance = [&](std::uint64_t n) { at = n > src.size() ? src.size() : std::min(at + n, src.size()); };
-  while (mdat_size == 0 || used < mdat_size) {
+  while (mdat_size - used >= 4) {
     if (src.read(at, 4, hdr) < 4) break;
     at += 4;
+    used += 4;
     const std::uint32_t n = load_be32(hdr);
+    if (n > mdat_size - used) break;  // never read a partial NAL across the atom boundary
+    used += n;
     if (n < 2) {
-      advance(n);
-      used += 4 + std::uint64_t{n};
+      at += n;
       continue;
     }
     if (src.read(at, 2, hdr) < 2) break;
-    used += 4 + std::uint64_t{n};
     if ((hdr[0] & 0x1F) != kNalTypeSei || hdr[1] != kSeiUserDataUnregistered) {
-      advance(n);
+      at += n;
       continue;
     }
-    // Size the buffer by what's left in the file, not by the (untrusted) length prefix.
-    nal.resize(static_cast<std::size_t>(std::min<std::uint64_t>(n, src.size() - std::min(at, src.size()))));
-    nal.resize(src.read(at, nal.size(), nal.data()));
-    advance(n);
+    // The length has been checked against both the atom boundary and the actual file size.
+    nal.resize(n);
+    if (src.read(at, nal.size(), nal.data()) != nal.size()) break;
+    at += n;
     const auto payload = sei_payload(nal);
     if (!payload) continue;
     auto frame = decode_proto(*payload);

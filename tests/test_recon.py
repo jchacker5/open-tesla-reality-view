@@ -66,6 +66,7 @@ def test_export_path_and_nvs(tmp_path):
     # No telemetry: assume 11 m/s over the registered span (t 0..5).
     units = np.linalg.norm(np.diff([f["p"] for f in path["frames"]], axis=0), axis=1).sum()
     assert path["metresPerUnit"] == pytest.approx(11.0 * 5 / units, rel=1e-4)
+    assert path["scaleSource"] == "assumed-speed"
 
     views = json.loads((recon.export_nvs(work, fps=2.0) / "views.json").read_text())
     refs = views["references"]
@@ -88,6 +89,33 @@ def test_export_path_scale_from_telemetry(tmp_path):
     path = json.loads(recon.export_path(work, work / "dense").read_text())
     units = np.linalg.norm(np.diff([f["p"] for f in path["frames"]], axis=0), axis=1).sum()
     assert path["metresPerUnit"] == pytest.approx(50.0 / units, rel=1e-4)
+    assert path["scaleSource"] == "telemetry"
+
+
+def test_scale_fallbacks_are_explicit():
+    assert recon.scale_estimate([], 0, 5, 0) == (1.0, "default-stationary")
+    assert recon.scale_estimate([{"t": 0, "mph": 0}, {"t": 5, "mph": 0}], 0, 5, 2) == (
+        1.0,
+        "default-insufficient-telemetry",
+    )
+    for units in (float("nan"), float("inf"), -1):
+        with pytest.raises(ValueError, match="scale requires"):
+            recon.scale_estimate([], 0, 5, units)
+
+
+def test_stationary_path_does_not_export_invalid_headings(tmp_path):
+    work = make_work(tmp_path)
+    model = work / "dense/sparse/images.txt"
+    lines = model.read_text().splitlines()
+    for i, line in enumerate(lines):
+        if "front/" in line:
+            fields = line.split()
+            fields[5:8] = ["0", "0", "0"]
+            lines[i] = " ".join(fields)
+    model.write_text("\n".join(lines) + "\n")
+    with pytest.raises(SystemExit, match="stationary"):
+        recon.export_path(work, work / "dense")
+    assert not (work / "viewer/path.json").exists()
 
 
 def sei_rows(fps, seconds, mps=10.0, seq0=5000):

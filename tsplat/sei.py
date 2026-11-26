@@ -108,6 +108,8 @@ def _payload(nal: bytes) -> bytes | None:
 
 
 def _find_mdat(fp) -> tuple[int, int]:
+    fp.seek(0, 2)
+    file_size = fp.tell()
     fp.seek(0)
     while True:
         hdr = fp.read(8)
@@ -122,7 +124,8 @@ def _find_mdat(fp) -> tuple[int, int]:
         else:
             size, hsize = size32, 8
         if typ == b"mdat":
-            return fp.tell(), (size - hsize if size else 0)
+            remaining = max(0, file_size - fp.tell())
+            return fp.tell(), min(remaining, max(0, size - hsize)) if size else remaining
         if size < hsize:
             raise RuntimeError("invalid MP4 atom size")
         fp.seek(size - hsize, 1)
@@ -157,23 +160,27 @@ def extract_py(path: str | Path) -> list[dict]:
         off, size = _find_mdat(fp)
         fp.seek(off)
         used = 0
-        while size == 0 or used < size:
+        while size - used >= 4:
             hdr = fp.read(4)
             if len(hdr) < 4:
                 break
             n = struct.unpack(">I", hdr)[0]
+            used += 4
+            if n > size - used:
+                break  # a partial NAL cannot borrow bytes from the following atom
+            used += n
             if n < 2:
                 fp.seek(n, 1)
-                used += 4 + n
                 continue
             two = fp.read(2)
             if len(two) != 2:
                 break
-            used += 4 + n
             if (two[0] & 0x1F) != 6 or two[1] != 5:  # SEI / user_data_unregistered
                 fp.seek(n - 2, 1)
                 continue
             rest = fp.read(n - 2)
+            if len(rest) != n - 2:
+                break
             p = _payload(two + rest)
             meta = decode_proto(p) if p else None
             if meta and "frame_seq_no" in meta:

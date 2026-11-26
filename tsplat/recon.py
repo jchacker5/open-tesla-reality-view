@@ -322,12 +322,21 @@ def metres_driven(tel: list[dict], t0: float, t1: float) -> float:
 
 def metres_per_unit(tel: list[dict], t0: float, t1: float, units: float) -> float:
     """Scene scale over the registered path's time span [t0, t1] (`units` = path length on that span)."""
+    return scale_estimate(tel, t0, t1, units)[0]
+
+
+def scale_estimate(tel: list[dict], t0: float, t1: float, units: float) -> tuple[float, str]:
+    """Return the scale and its provenance; fallback values are not metric measurements."""
+    if not np.isfinite([t0, t1, units]).all() or t1 <= t0 or units < 0:
+        raise ValueError("scale requires a finite increasing time span and nonnegative path length")
     if units <= 1e-6:
-        return 1.0
+        return 1.0, "default-stationary"
     if tel:
         metres = metres_driven(tel, t0, t1)
-        return metres / units if metres > 5 else 1.0
-    return 11.0 * (t1 - t0) / units  # no SEI: assume ~11 m/s (25 mph) so the chase cam distance is sane
+        if np.isfinite(metres) and metres > 5:
+            return metres / units, "telemetry"
+        return 1.0, "default-insufficient-telemetry"
+    return 11.0 * (t1 - t0) / units, "assumed-speed"  # no SEI: assume ~11 m/s (25 mph)
 
 
 def export_path(work: Path, dense: Path) -> Path:
@@ -354,17 +363,32 @@ def export_path(work: Path, dense: Path) -> Path:
         raise SystemExit("too few registered frames to build a camera path")
     idxs = sorted(centres)
     P = np.array([np.mean(centres[i], 0) for i in idxs])
+    if not np.isfinite(P).all() or not np.isfinite(meta["fps"]) or meta["fps"] <= 0:
+        raise SystemExit("camera path requires finite poses and a positive sample rate")
     k = 2  # moving-average smoothing
     Ps = np.array([P[max(0, i - k) : i + k + 1].mean(0) for i in range(len(P))])
     F = np.gradient(Ps, axis=0)
-    F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-9
+    lengths = np.linalg.norm(F, axis=1)
+    moving = np.flatnonzero(lengths > 1e-9)
+    if not len(moving):
+        raise SystemExit("camera path is stationary; select a clip with a moving camera")
+    # Pauses retain the nearest measured travel direction instead of producing a zero heading.
+    for i in np.flatnonzero(lengths <= 1e-9):
+        F[i] = F[moving[np.argmin(np.abs(moving - i))]]
+    F /= np.linalg.norm(F, axis=1, keepdims=True)
     # up = camera up with pitch removed (perpendicular to the direction of travel)
     U = np.array([np.mean(ups[i], 0) for i in idxs])
     U -= (U * F).sum(1, keepdims=True) * F
     up = U.mean(0)
-    up /= np.linalg.norm(up)
+    up_length = np.linalg.norm(up)
+    if not np.isfinite(up_length) or up_length <= 1e-9:
+        raise SystemExit("camera path has no consistent up direction")
+    up /= up_length
     F -= np.outer(F @ up, up)
-    F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-9
+    lengths = np.linalg.norm(F, axis=1, keepdims=True)
+    if not np.isfinite(F).all() or (lengths <= 1e-9).any():
+        raise SystemExit("camera path heading is parallel to its up direction")
+    F /= lengths
     path = [
         {"t": round(i / meta["fps"], 3), "p": p.round(5).tolist(), "f": f.round(5).tolist()}
         for i, p, f in zip(idxs, Ps, F, strict=False)
@@ -372,12 +396,13 @@ def export_path(work: Path, dense: Path) -> Path:
 
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
-    scale = metres_per_unit(tel, path[0]["t"], path[-1]["t"], units)
+    scale, scale_source = scale_estimate(tel, path[0]["t"], path[-1]["t"], units)
     cam_h = fit_cam_height(read_points(dense), Ps, up, scale)
     out = work / "viewer" / "path.json"
     doc = {
         "up": up.round(5).tolist(),
         "metresPerUnit": scale,
+        "scaleSource": scale_source,
         "camHeight": round(cam_h if cam_h is not None else CAM_HEIGHT_M, 3),  # front camera above the road, m
         "camHeightSource": "sfm" if cam_h is not None else "default",
         "frames": path,
@@ -390,9 +415,9 @@ def export_path(work: Path, dense: Path) -> Path:
     colours = json.loads(sky_json.read_text()).get("colours") if sky_json.exists() else None
     if colours:  # mean real sky colour, sRGB 0-1: the viewer's background gradient
         doc["sky"] = {"top": colours["top"], "horizon": colours["horizon"]}
-    out.write_text(json.dumps(doc))
+    out.write_text(json.dumps(doc, allow_nan=False))
     print(
-        f"path: {len(path)} poses, {scale:.3f} m/unit, camera {doc['camHeight']} m above the road "
+        f"path: {len(path)} poses, {scale:.3f} m/unit ({scale_source}), camera {doc['camHeight']} m above the road "
         f"({doc['camHeightSource']}) -> {out}"
     )
     return out

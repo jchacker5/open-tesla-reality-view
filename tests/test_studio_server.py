@@ -133,6 +133,9 @@ def test_cities_are_served_on_their_own_origin(tmp_path):
     assert r.status_code == 200 and "<html" in r.text.lower()
     csp = r.headers["content-security-policy"]
     assert csp != server.CSP and "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
+    image_sources = next(d for d in csp.split(";") if d.strip().startswith("img-src"))
+    assert server.MAP_TILES in image_sources  # opt-in map images work in the city viewer
+    assert server.MAP_TILES not in server.CSP  # the studio itself still makes no external requests
     assert r.headers["x-frame-options"] == "DENY" and r.headers["referrer-policy"] == "no-referrer"
     assert c.get("/cities/drive1/path.json").json() == []
     r = c.get("/cities/drive1/scene.ply", headers={"Range": "bytes=0-3"})

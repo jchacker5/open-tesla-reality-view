@@ -1,12 +1,14 @@
 #include "otrv/splat.hpp"
+#include "otrv/detail/parallel.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <sstream>
@@ -79,7 +81,8 @@ Vec3 cross(const Vec3& a, const Vec3& b) {
 }
 
 Vec3 normalized(const Vec3& v) {
-  const double n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  const double n = std::hypot(v[0], v[1], v[2]);
+  if (!std::isfinite(n) || n <= 0) throw std::invalid_argument("camera orientation must be finite and nondegenerate");
   return {v[0] / n, v[1] / n, v[2] / n};
 }
 
@@ -122,7 +125,8 @@ std::array<float, 3> eval_sh(int degree, const float* sh, const Vec3& d) {
   for (int c = 0; c < 3; ++c) {
     double v = 0.5;
     for (int i = 0; i < k; ++i) v += basis[static_cast<std::size_t>(i)] * sh[i * 3 + c];
-    rgb[static_cast<std::size_t>(c)] = static_cast<float>(std::max(0.0, v));
+    rgb[static_cast<std::size_t>(c)] =
+        static_cast<float>(std::clamp(v, 0.0, static_cast<double>(std::numeric_limits<float>::max())));
   }
   return rgb;
 }
@@ -144,26 +148,31 @@ Gaussians load_ply(const std::filesystem::path& path) {
   if (!in) throw PlyError("cannot open " + path.string());
 
   std::string line;
-  if (!std::getline(in, line) || line.rfind("ply", 0) != 0) throw PlyError(path.string() + " is not a PLY file");
+  if (!std::getline(in, line) || (line != "ply" && line != "ply\r")) throw PlyError(path.string() + " is not a PLY file");
   std::size_t count = 0, stride = 0;
   std::map<std::string, PlyProperty> props;
-  bool in_vertex = false, seen_vertex = false, format_ok = false;
+  bool in_vertex = false, seen_vertex = false, format_ok = false, ended = false;
   while (std::getline(in, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     std::istringstream ss(line);
     std::string word;
     ss >> word;
     if (word == "format") {
-      std::string fmt;
-      ss >> fmt;
+      std::string fmt, version;
+      ss >> fmt >> version;
       if (fmt != "binary_little_endian") throw PlyError("only binary_little_endian PLY is supported, not " + fmt);
+      if (format_ok || version != "1.0") throw PlyError("invalid PLY format declaration");
       format_ok = true;
     } else if (word == "element") {
       std::string name;
       ss >> name;
       in_vertex = name == "vertex";
       if (in_vertex) {
-        ss >> count;
+        if (seen_vertex) throw PlyError("duplicate PLY vertex element");
+        std::string token;
+        ss >> token;
+        const auto [end, ec] = std::from_chars(token.data(), token.data() + token.size(), count);
+        if (ec != std::errc{} || end != token.data() + token.size()) throw PlyError("invalid PLY vertex count");
         seen_vertex = true;
       } else if (!seen_vertex) {
         throw PlyError("elements before 'vertex' are not supported");
@@ -173,14 +182,19 @@ Gaussians load_ply(const std::filesystem::path& path) {
       ss >> type;
       if (type == "list") throw PlyError("list properties in 'vertex' are not supported");
       ss >> name;
-      props[name] = {type, stride};
-      stride += type_size(type);
+      if (name.empty() || props.count(name)) throw PlyError("missing or duplicate PLY property name");
+      const auto width = type_size(type);
+      if (stride > std::numeric_limits<std::size_t>::max() - width) throw PlyError("PLY vertex stride is too large");
+      props.emplace(name, PlyProperty{type, stride});
+      stride += width;
     } else if (word == "end_header") {
+      ended = true;
       break;
     }
   }
   if (!format_ok) throw PlyError("PLY header has no format line");
   if (!seen_vertex) throw PlyError("PLY has no vertex element");
+  if (!ended) throw PlyError("PLY has no end_header");
 
   const auto need = [&](const std::string& n) -> const PlyProperty& {
     const auto it = props.find(n);
@@ -194,6 +208,10 @@ Gaussians load_ply(const std::filesystem::path& path) {
   const PlyProperty& op = need("opacity");
   std::size_t rest = 0;
   while (props.count("f_rest_" + std::to_string(rest))) ++rest;
+  const auto rest_total = static_cast<std::size_t>(std::count_if(props.begin(), props.end(), [](const auto& p) {
+    return p.first.starts_with("f_rest_");
+  }));
+  if (rest != rest_total || rest > 45) throw PlyError("invalid f_rest_* property sequence");
   int degree = 0;
   while ((degree + 1) * (degree + 1) - 1 < static_cast<int>(rest / 3) && degree < 3) ++degree;
   const auto k = static_cast<std::size_t>((degree + 1) * (degree + 1));
@@ -201,6 +219,18 @@ Gaussians load_ply(const std::filesystem::path& path) {
   std::vector<const PlyProperty*> rest_props;
   for (std::size_t i = 0; i < rest; ++i) rest_props.push_back(&props["f_rest_" + std::to_string(i)]);
 
+  // Validate against actual payload bytes before multiplying counts or allocating any buffers.
+  const auto begin = in.tellg();
+  in.seekg(0, std::ios::end);
+  const auto end = in.tellg();
+  if (begin < 0 || end < begin) throw PlyError("cannot determine PLY payload size");
+  const auto remaining = static_cast<std::uintmax_t>(end - begin);
+  if (stride == 0 || count > remaining / stride) throw PlyError("PLY is truncated: vertex count exceeds payload");
+  if (count > std::vector<float>().max_size() / (k * 3) ||
+      count > std::vector<float>().max_size() / 4 ||
+      count > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max()) / stride)
+    throw PlyError("PLY vertex count is too large");
+  in.seekg(begin);
   std::vector<std::uint8_t> data(count * stride);
   if (!in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size())))
     throw PlyError("PLY is truncated: expected " + std::to_string(count) + " vertices");
@@ -214,7 +244,11 @@ Gaussians load_ply(const std::filesystem::path& path) {
   g.sh.resize(count * k * 3);
   for (std::size_t i = 0; i < count; ++i) {
     const std::uint8_t* rec = data.data() + i * stride;
-    const auto get = [&](const PlyProperty* p) { return read_scalar(rec + p->offset, p->type); };
+    const auto get = [&](const PlyProperty* p) {
+      const float value = read_scalar(rec + p->offset, p->type);
+      if (!std::isfinite(value)) throw PlyError("nonfinite Gaussian property in PLY");
+      return value;
+    };
     for (std::size_t a = 0; a < 3; ++a) {
       g.position[3 * i + a] = get(pos[a]);
       g.log_scale[3 * i + a] = get(scl[a]);
@@ -237,6 +271,8 @@ Vec3 Camera::centre() const {
 
 Camera Camera::look_at(const Vec3& eye, const Vec3& target, const Vec3& up, double vertical_fov_deg, int width,
                        int height) {
+  if (!std::isfinite(vertical_fov_deg) || vertical_fov_deg <= 0 || vertical_fov_deg >= 180 || width <= 0 || height <= 0)
+    throw std::invalid_argument("camera requires positive dimensions and a field of view between 0 and 180 degrees");
   const Vec3 z = normalized({target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]});  // forward
   const Vec3 x = normalized(cross(z, up));  // right (image x); up points to -y in the image
   const Vec3 y = cross(z, x);               // down
@@ -266,8 +302,10 @@ Camera Camera::from_colmap(const std::array<double, 4>& q, const Vec3& tvec, int
 
 std::vector<std::uint8_t> Image::to_rgb8() const {
   std::vector<std::uint8_t> out(rgb.size());
-  for (std::size_t i = 0; i < rgb.size(); ++i)
+  for (std::size_t i = 0; i < rgb.size(); ++i) {
+    if (!std::isfinite(rgb[i])) throw std::invalid_argument("image contains nonfinite colour");
     out[i] = static_cast<std::uint8_t>(std::lround(std::clamp(rgb[i], 0.0f, 1.0f) * 255.0f));
+  }
   return out;
 }
 
@@ -276,20 +314,38 @@ Image render(const Gaussians& g, const Camera& cam, const RenderOptions& opts, R
   const auto ms_since = [](clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(clock::now() - t0).count();
   };
-  if (cam.width <= 0 || cam.height <= 0) throw std::invalid_argument("camera has no pixels");
+  if (cam.width <= 0 || cam.height <= 0 || cam.width > std::numeric_limits<int>::max() - kTile ||
+      cam.height > std::numeric_limits<int>::max() - kTile)
+    throw std::invalid_argument("camera dimensions are outside the supported range");
+  const auto all_finite = [](const auto& values) {
+    return std::all_of(values.begin(), values.end(), [](auto value) { return std::isfinite(value); });
+  };
+  if (!(cam.fx > 0 && cam.fy > 0) || !all_finite(std::array{cam.fx, cam.fy, cam.cx, cam.cy}) ||
+      !all_finite(cam.t) || !std::all_of(cam.R.begin(), cam.R.end(), all_finite))
+    throw std::invalid_argument("camera intrinsics and pose must be finite, with positive focal lengths");
+  if (!std::isfinite(opts.near_plane) || opts.near_plane <= 0 || !std::isfinite(opts.dilation) ||
+      opts.dilation < 0 || opts.threads < 0 || !all_finite(opts.background))
+    throw std::invalid_argument("invalid render options");
   const std::size_t n = g.size();
-  const int tiles_x = (cam.width + kTile - 1) / kTile, tiles_y = (cam.height + kTile - 1) / kTile;
+  if (g.sh_degree < 0 || g.sh_degree > 3 || n > std::numeric_limits<std::uint32_t>::max() ||
+      n > std::vector<float>().max_size() / 48)
+    throw std::invalid_argument("unsupported Gaussian count or SH degree");
+  const auto k_sh = static_cast<std::size_t>((g.sh_degree + 1) * (g.sh_degree + 1));
+  if (g.position.size() != 3 * n || g.log_scale.size() != 3 * n || g.rotation.size() != 4 * n ||
+      g.sh.size() != n * k_sh * 3)
+    throw std::invalid_argument("Gaussian arrays have inconsistent sizes");
+  if (!all_finite(g.position) || !all_finite(g.log_scale) || !all_finite(g.rotation) ||
+      !all_finite(g.opacity) || !all_finite(g.sh))
+    throw std::invalid_argument("Gaussian arrays contain nonfinite values");
+  const int tiles_x = 1 + (cam.width - 1) / kTile, tiles_y = 1 + (cam.height - 1) / kTile;
+  const auto ntiles = static_cast<std::size_t>(tiles_x) * static_cast<std::size_t>(tiles_y);
+  if (ntiles > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+      static_cast<std::size_t>(cam.width) > std::vector<float>().max_size() / 3 / static_cast<std::size_t>(cam.height))
+    throw std::invalid_argument("camera dimensions are too large");
   const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
   const unsigned nthreads = opts.threads > 0 ? static_cast<unsigned>(opts.threads) : hw;
   const auto parallel_for = [&](std::size_t count, auto&& body) {
-    std::atomic<std::size_t> next{0};
-    const auto work = [&] {
-      for (std::size_t i; (i = next.fetch_add(1)) < count;) body(i);
-    };
-    std::vector<std::thread> pool;
-    for (unsigned k = 1; k < std::min<std::size_t>(nthreads, count); ++k) pool.emplace_back(work);
-    work();
-    for (auto& t : pool) t.join();
+    otrv::detail::parallel_for(count, nthreads, body);
   };
 
   // 1. Project every Gaussian (in parallel chunks).
@@ -299,14 +355,14 @@ Image render(const Gaussians& g, const Camera& cam, const RenderOptions& opts, R
   std::vector<std::array<int, 4>> rect(n);  // tile rect [x0, y0, x1, y1)
   const Vec3 centre = cam.centre();
   const double lim_x = 1.3 * 0.5 * cam.width / cam.fx, lim_y = 1.3 * 0.5 * cam.height / cam.fy;
-  const auto k_sh = static_cast<std::size_t>((g.sh_degree + 1) * (g.sh_degree + 1));
   constexpr std::size_t kChunk = 4096;
   parallel_for((n + kChunk - 1) / kChunk, [&](std::size_t chunk) {
     for (std::size_t i = chunk * kChunk; i < std::min(n, (chunk + 1) * kChunk); ++i) {
       const Vec3 pw{g.position[3 * i], g.position[3 * i + 1], g.position[3 * i + 2]};
       const Vec3 pc = mul(cam.R, pw);
       const double x = pc[0] + cam.t[0], y = pc[1] + cam.t[1], z = pc[2] + cam.t[2];
-      if (z < opts.near_plane) continue;
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || z < opts.near_plane ||
+          z > std::numeric_limits<float>::max()) continue;
 
       // 3D covariance: Sigma = (R S)(R S)^T in world space, then into camera space with W = cam.R.
       const Mat3 rq =
@@ -332,15 +388,18 @@ Image render(const Gaussians& g, const Camera& cam, const RenderOptions& opts, R
       Mat2 cov{u[0] * u[0] + u[1] * u[1] + u[2] * u[2] + opts.dilation, u[0] * v[0] + u[1] * v[1] + u[2] * v[2],
                v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + opts.dilation};
       const double det = cov[0] * cov[2] - cov[1] * cov[1];
-      if (det <= 0) continue;
+      if (!std::isfinite(det) || det <= 0) continue;
       const double mid = 0.5 * (cov[0] + cov[2]);
       const double lambda = mid + std::sqrt(std::max(0.1, mid * mid - det));
       const double radius = std::ceil(3.0 * std::sqrt(lambda));
       const double mx = cam.fx * x / z + cam.cx, my = cam.fy * y / z + cam.cy;
-      const int x0 = std::clamp(static_cast<int>(std::floor((mx - radius) / kTile)), 0, tiles_x);
-      const int x1 = std::clamp(static_cast<int>(std::floor((mx + radius + kTile - 1) / kTile)), 0, tiles_x);
-      const int y0 = std::clamp(static_cast<int>(std::floor((my - radius) / kTile)), 0, tiles_y);
-      const int y1 = std::clamp(static_cast<int>(std::floor((my + radius + kTile - 1) / kTile)), 0, tiles_y);
+      if (!std::isfinite(radius) || !std::isfinite(mx) || !std::isfinite(my) ||
+          std::abs(mx) > std::numeric_limits<float>::max() || std::abs(my) > std::numeric_limits<float>::max()) continue;
+      const auto tile_bound = [](double value, int limit) {
+        return static_cast<int>(std::clamp(std::floor(value / kTile), 0.0, static_cast<double>(limit)));
+      };
+      const int x0 = tile_bound(mx - radius, tiles_x), x1 = tile_bound(mx + radius + kTile - 1, tiles_x);
+      const int y0 = tile_bound(my - radius, tiles_y), y1 = tile_bound(my + radius + kTile - 1, tiles_y);
       if (x0 >= x1 || y0 >= y1) continue;
 
       const Vec3 dir = normalized({pw[0] - centre[0], pw[1] - centre[1], pw[2] - centre[2]});
@@ -360,7 +419,6 @@ Image render(const Gaussians& g, const Camera& cam, const RenderOptions& opts, R
   // 2. Bin into tiles (counting sort), then sort each tile's list by (depth, index) in parallel.
   //    Same order as one global sort on (tile, depth, index), without its serial n log n.
   t0 = clock::now();
-  const auto ntiles = static_cast<std::size_t>(tiles_x * tiles_y);
   std::vector<std::size_t> start(ntiles + 1, 0);
   std::size_t visible = 0;
   for (std::size_t i = 0; i < n; ++i) {
@@ -408,10 +466,10 @@ Image render(const Gaussians& g, const Camera& cam, const RenderOptions& opts, R
         std::array<float, 3> c{0, 0, 0};
         for (std::size_t k = start[tile]; k < start[tile + 1]; ++k) {
           const Splat2D& s = splats[order[k]];
-          const float dx = s.mx - fx, dy = s.my - fy;
-          const float power = -0.5f * (s.ca * dx * dx + s.cc * dy * dy) - s.cb * dx * dy;
-          if (power > 0) continue;
-          const float a = std::min(kMaxAlpha, s.opacity * std::exp(power));
+          const double dx = static_cast<double>(s.mx) - fx, dy = static_cast<double>(s.my) - fy;
+          const double power = -0.5 * (s.ca * dx * dx + s.cc * dy * dy) - s.cb * dx * dy;
+          if (!std::isfinite(power) || power > 0) continue;
+          const float a = static_cast<float>(std::min(static_cast<double>(kMaxAlpha), s.opacity * std::exp(power)));
           if (a < kMinAlpha) continue;
           const float next = T * (1 - a);
           if (next < kMinTransmittance) break;
@@ -454,10 +512,13 @@ void put32(std::vector<std::uint8_t>& out, std::uint32_t v) {
 }
 
 void chunk(std::ofstream& f, const char* type, const std::vector<std::uint8_t>& data) {
+  if (data.size() > 0x7FFFFFFFu || data.size() > std::vector<std::uint8_t>().max_size() - 12)
+    throw std::invalid_argument("PNG chunk is too large");
   std::vector<std::uint8_t> buf;
+  buf.reserve(data.size() + 12);
   put32(buf, static_cast<std::uint32_t>(data.size()));
   buf.insert(buf.end(), type, type + 4);
-  buf.insert(buf.end(), data.begin(), data.end());
+  if (!data.empty()) buf.insert(buf.end(), data.begin(), data.end());
   put32(buf, crc32(buf.data() + 4, buf.size() - 4));
   f.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
 }

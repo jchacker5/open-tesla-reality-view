@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -125,7 +126,7 @@ def test_bytes_to_copy_skips_files_already_copied(teslacam, tmp_path):
     f.write_bytes(b"x" * 100)
     dest = tmp_path / "dest"
     (dest / "RecentClips").mkdir(parents=True)
-    (dest / "RecentClips" / f.name).write_bytes(b"x" * 100)
+    shutil.copy2(f, dest / "RecentClips" / f.name)
     total, new = ingest.bytes_to_copy(teslacam, dest, [f.relative_to(teslacam)])
     assert (total, new) == (100, 0)
 
@@ -159,3 +160,54 @@ def test_copy_without_rsync(teslacam, tmp_path, monkeypatch):
     files = ingest.select_files(teslacam)
     ingest.copy(teslacam, dest, files)
     assert {str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file()} == {str(f) for f in files}
+
+
+def test_copy_replaces_same_size_changed_file_atomically(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest.shutil, "which", lambda name: None)
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    src.mkdir()
+    dest.mkdir()
+    (src / "clip.mp4").write_bytes(b"new")
+    (dest / "clip.mp4").write_bytes(b"old")
+    os.utime(src / "clip.mp4", ns=(2_000_000_000, 2_000_000_000))
+    os.utime(dest / "clip.mp4", ns=(1_000_000_000, 1_000_000_000))
+    assert ingest.bytes_to_copy(src, dest, [Path("clip.mp4")]) == (3, 3)
+    real_copy = shutil.copy2
+
+    def interrupted_copy(source, target):
+        Path(target).write_bytes(b"bad")
+        raise OSError("interrupted copy")
+
+    monkeypatch.setattr(ingest.shutil, "copy2", interrupted_copy)
+    with pytest.raises(OSError, match="interrupted"):
+        ingest.copy(src, dest, [Path("clip.mp4")])
+    assert (dest / "clip.mp4").read_bytes() == b"old"
+    assert list(dest.iterdir()) == [dest / "clip.mp4"]
+    monkeypatch.setattr(ingest.shutil, "copy2", real_copy)
+    ingest.copy(src, dest, [Path("clip.mp4")])
+    assert (dest / "clip.mp4").read_bytes() == b"new"
+    assert ingest.bytes_to_copy(src, dest, [Path("clip.mp4")]) == (3, 0)
+
+
+def test_speed_cache_invalidates_same_size_changed_footage(tmp_path, monkeypatch):
+    recent = tmp_path / "RecentClips"
+    recent.mkdir()
+    front = recent / "2026-01-02_03-04-05-front.mp4"
+    front.write_bytes(b"old")
+    monkeypatch.setattr(ingest, "duration", lambda p: 60.0)
+    calls = []
+
+    def read_speed(path, seconds):
+        calls.append(Path(path).read_bytes())
+        return {"mean_mph": len(calls), "mph_1hz": [len(calls)]}
+
+    monkeypatch.setattr(ingest.speed, "clip_speed", read_speed)
+    index = ingest.build_index(tmp_path)
+    (tmp_path / "index.json").write_text(json.dumps(index))
+    assert ingest.build_index(tmp_path)[0]["mph"] == 1
+    assert len(calls) == 1
+    original = front.stat().st_mtime_ns
+    front.write_bytes(b"new")
+    os.utime(front, ns=(original + 1_000_000_000, original + 1_000_000_000))
+    assert ingest.build_index(tmp_path)[0]["mph"] == 2
+    assert calls == [b"old", b"new"]

@@ -48,10 +48,12 @@ CSP = (
 # imports three.js and Spark from cdn.jsdelivr.net through an inline import map, so this policy allows that
 # CDN and inline scripts; once the viewer vendors those libraries it can drop both.
 CDN = "https://cdn.jsdelivr.net"
+MAP_TILES = "https://server.arcgisonline.com"
 CITY_CSP = (
     f"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: {CDN}; "
     f"worker-src 'self' blob: data: {CDN}; connect-src 'self' blob: data: {CDN}; "
-    "img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
+    f"img-src 'self' data: blob: {MAP_TILES}; media-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
     "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 

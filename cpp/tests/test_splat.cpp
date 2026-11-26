@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <random>
@@ -11,6 +13,7 @@
 #include <vector>
 
 #include "otrv/splat.hpp"
+#include "otrv/detail/parallel.hpp"
 
 namespace splat = otrv::splat;
 namespace fs = std::filesystem;
@@ -270,4 +273,76 @@ TEST_CASE("PNG output is a valid image") {
   CHECK(std::string(head.begin() + 12, head.begin() + 16) == "IHDR");
   fs::remove(path);
   CHECK_THROWS((void)splat::write_png(path, 10, 10, rgb));
+}
+
+TEST_CASE("PLY rejects malformed headers and impossible counts before allocating") {
+  const auto path = tmp("invalid_scene.ply");
+  const auto header = [](const std::string& count) {
+    std::string out = "ply\nformat binary_little_endian 1.0\nelement vertex " + count + "\n";
+    for (const auto* name : {"x", "y", "z", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2",
+                             "rot_3", "f_dc_0", "f_dc_1", "f_dc_2", "opacity"})
+      out += std::string("property float ") + name + "\n";
+    return out;
+  };
+  const auto check = [&](const std::string& contents) {
+    { std::ofstream f(path, std::ios::binary); f << contents; }
+    CHECK_THROWS_AS((void)splat::load_ply(path), splat::PlyError);
+  };
+  for (const auto* count : {"-1", "oops", "1x", "18446744073709551615", "18446744073709551616"})
+    check(header(count) + "end_header\n");
+  check(header("0"));
+  check(header("0") + "property float x\nend_header\n");
+  check(header("0") + "element vertex 0\nend_header\n");
+  check(header("0") + "property float f_rest_1\nend_header\n");
+  fs::remove(path);
+}
+
+TEST_CASE("renderer rejects invalid shapes and camera parameters") {
+  auto g = make({G{}});
+  auto cam = camera();
+  SUBCASE("missing position") { g.position.clear(); }
+  SUBCASE("missing rotation") { g.rotation.clear(); }
+  SUBCASE("missing colour") { g.sh.clear(); }
+  SUBCASE("invalid SH degree") { g.sh_degree = 4; }
+  SUBCASE("nonfinite position") { g.position[0] = std::numeric_limits<float>::quiet_NaN(); }
+  SUBCASE("zero focal length") { cam.fx = 0; }
+  SUBCASE("nonfinite camera") { cam.t[0] = std::numeric_limits<double>::infinity(); }
+  CHECK_THROWS_AS((void)splat::render(g, cam), std::invalid_argument);
+}
+
+TEST_CASE("renderer handles extreme finite projections without float to int overflow") {
+  auto g = make({G{}});
+  splat::RenderStats stats;
+  g.position[0] = 1e30f;
+  CHECK_NOTHROW((void)splat::render(g, camera(), {}, &stats));
+  CHECK(stats.visible == 0);
+  g.position[0] = 0;
+  g.log_scale[0] = 1000;
+  const auto img = splat::render(g, camera(), {}, &stats);
+  CHECK(stats.visible == 0);
+  for (float value : img.rgb) CHECK(std::isfinite(value));
+  auto cam = camera(std::numeric_limits<int>::max(), std::numeric_limits<int>::max());
+  CHECK_THROWS_AS((void)splat::render(g, cam), std::invalid_argument);
+}
+
+TEST_CASE("look_at rejects degenerate orientation and invalid field of view") {
+  CHECK_THROWS_AS((void)splat::Camera::look_at({0, 0, 0}, {0, 0, 0}, {0, 1, 0}, 60, 10, 10), std::invalid_argument);
+  CHECK_THROWS_AS((void)splat::Camera::look_at({0, 0, 0}, {0, 0, 1}, {0, 0, 1}, 60, 10, 10), std::invalid_argument);
+  CHECK_THROWS_AS((void)splat::Camera::look_at({0, 0, 0}, {0, 0, 1}, {0, 1, 0}, 0, 10, 10), std::invalid_argument);
+}
+
+TEST_CASE("parallel workers join and propagate exceptions to the caller") {
+  std::atomic<int> active{0};
+  const auto run = [&] {
+    otrv::detail::parallel_for(100, 4, [&](std::size_t) {
+      struct Scope {
+        std::atomic<int>& active;
+        explicit Scope(std::atomic<int>& value) : active(value) { ++active; }
+        ~Scope() { --active; }
+      } scope(active);
+      throw std::runtime_error("worker failed");
+    });
+  };
+  CHECK_THROWS_WITH_AS(run(), "worker failed", std::runtime_error);
+  CHECK(active == 0);
 }

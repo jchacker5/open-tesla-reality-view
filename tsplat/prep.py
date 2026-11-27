@@ -394,6 +394,8 @@ STALE_DIRS = (
     "nvs",
     "_maskimgs",
     "_maskdense",
+    "visloc",
+    "visloc_in",
 )
 STALE_FILES = (
     "colmap.db",

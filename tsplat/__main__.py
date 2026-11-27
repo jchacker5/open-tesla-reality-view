@@ -50,6 +50,7 @@ from . import (
     sky,
     snapshot,
     speed,
+    visloc,
 )
 
 DEFAULT_DATA = "data/teslacam"
@@ -265,6 +266,9 @@ def build_parser() -> argparse.ArgumentParser:
         "until you set BRUSH",
     )
 
+    a = cmd("setup-visloc", f"download visloc-rs v{visloc.VERSION} (gsplat_photos) for this platform and verify sha256")
+    a.add_argument("--dir", default=str(visloc.INSTALL_DIR), help="install directory")
+
     a = cmd("ingest", "copy TeslaCam footage off the USB drive into the data dir and index it", data=True)
     a.add_argument(
         "--src", help="TeslaCam folder or a folder of downloaded clips (default: auto-detect /Volumes/*/TeslaCam)"
@@ -348,6 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=4.0,
         help="horizontal GPS prior standard deviation in metres (used with --gps-priors)",
+    )
+    a.add_argument(
+        "--backend",
+        choices=("colmap", "visloc"),
+        default="colmap",
+        help="reconstruction backend: colmap (COLMAP + Brush) or visloc (visloc-rs gsplat_photos; no COLMAP needed)",
     )
     a.add_argument(
         "--no-rig", action="store_true", help="don't tie the cameras together as a rigid rig (try if SfM fails)"
@@ -584,6 +594,53 @@ def cmd_suggest(args) -> None:
 
 def cmd_recon(args) -> None:
     work = need_prep(args.name)
+    if args.backend == "visloc":
+        doctor.preflight("recon", skip=("colmap", "brush"))
+        (work / "recon_args.json").unlink(missing_ok=True)
+        (work / "eval.json").unlink(missing_ok=True)
+        t0 = time.perf_counter()
+        rules = clean_rules(args, "off")
+        dense = visloc.run(work, steps=args.steps, rules=None)
+        recon.snapshot_dense(work)
+        recon.export_path(work, dense)
+        if rules and (rules.prune or rules.dehaze) and (work / "visloc" / "scene.ply").exists():
+            from . import clean
+
+            clean.run(work, work / "visloc" / "scene.ply", rules)
+        if georef.available() and all((work / "viewer" / f).exists() for f in ("path.json", "telemetry.json")):
+            try:
+                georef.run(work)
+            except Exception as e:
+                print(f"georef: skipped ({e})")
+        collision.run(work)
+        (work / "timings.json").write_text(json.dumps({"visloc": round(time.perf_counter() - t0, 1)}))
+        (work / "recon_args.json").write_text(
+            json.dumps(
+                {
+                    "backend": "visloc",
+                    "steps": args.steps,
+                    "global_mapper": False,
+                    "gps_priors": False,
+                    "gps_sigma": args.gps_sigma,
+                    "rig": not args.no_rig,
+                    "eval": False,
+                    "eval_split": None,
+                    "seed": args.seed,
+                    "opac_loss_weight": args.opac_loss_weight,
+                    "scale_loss_weight": args.scale_loss_weight,
+                    "max_splats": args.max_splats,
+                    "lpips_loss_weight": 0.0,
+                    "sky": "off",
+                    "sky_counts": {},
+                    "dense_init": False,
+                    "color_norm": False,
+                    "clean": dataclasses.asdict(rules),
+                }
+            )
+        )
+        print(f"done: `otrv view {args.name}` to replay it, `otrv bench {args.name}` to score it")
+        return
+
     if args.skip_sfm and not (work / "dense" / "sparse" / "images.txt").exists():
         raise SystemExit(f"--skip-sfm needs an earlier recon's {work / 'dense'}: run `otrv recon {args.name}` first")
     doctor.preflight("recon", skip=("colmap",) if args.skip_sfm else ())
@@ -647,6 +704,7 @@ def cmd_recon(args) -> None:
     (work / "recon_args.json").write_text(
         json.dumps(
             {
+                "backend": args.backend,
                 "steps": args.steps,
                 "global_mapper": args.global_mapper,
                 "gps_priors": args.gps_priors,
@@ -771,6 +829,9 @@ def dispatch(args) -> None:
         sys.exit(doctor.doctor())
     elif c == "setup-brush":
         cmd_setup_brush(args)
+    elif c == "setup-visloc":
+        exe = visloc.setup(Path(args.dir).expanduser())
+        print(f"visloc-rs installed: {exe}")
     elif c == "ingest":
         doctor.preflight("ingest")
         ingest.run(args.src, args.data, args.index_only, args.kinds, args.since)

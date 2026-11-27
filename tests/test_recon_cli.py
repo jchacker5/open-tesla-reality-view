@@ -25,7 +25,7 @@ def stubbed(tmp_path, monkeypatch):
     (dense / "sparse").mkdir(parents=True)
     poses = "".join(f"{i + 1} 1 0 0 0 0 0 {i} 1 front/front_{i:05d}.jpg\n\n" for i in range(24))
     (dense / "sparse" / "images.txt").write_text("# images\n" + poses)
-    monkeypatch.setattr(cli.recon, "sfm", lambda *a: work / "sparse" / "0")
+    monkeypatch.setattr(cli.recon, "sfm", lambda *a: calls.setdefault("sfm", a) and (work / "sparse" / "0"))
     monkeypatch.setattr(cli.recon, "undistort", lambda *a: dense)
     monkeypatch.setattr(cli.recon, "snapshot_dense", lambda *a: None)
     monkeypatch.setattr(cli.recon, "export_path", lambda *a: None)
@@ -107,3 +107,11 @@ def test_default_lpips_reaches_brush_and_recon_args(stubbed, monkeypatch):
     extra = calls["train"]["extra"]
     assert extra[extra.index("--lpips-loss-weight") + 1] == "0.05"
     assert json.loads((work / "recon_args.json").read_text())["lpips_loss_weight"] == 0.05
+
+
+def test_gps_priors_flag_reaches_sfm_and_recon_args(stubbed):
+    work, calls = stubbed
+    cli.main(["recon", "r", "--gps-priors", "--gps-sigma", "3.5"])
+    assert calls["sfm"][3:] == (True, 3.5)
+    rec = json.loads((work / "recon_args.json").read_text())
+    assert rec["gps_priors"] is True and rec["gps_sigma"] == 3.5

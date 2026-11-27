@@ -315,6 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--global-mapper", action="store_true", help="use COLMAP's global mapper instead of incremental")
     a.add_argument(
+        "--gps-priors",
+        action="store_true",
+        help="use SEI GPS fixes as COLMAP pose_prior_mapper priors (metric ENU scale, less drift)",
+    )
+    a.add_argument(
+        "--gps-sigma",
+        type=float,
+        default=4.0,
+        help="horizontal GPS prior standard deviation in metres (used with --gps-priors)",
+    )
+    a.add_argument(
         "--no-rig", action="store_true", help="don't tie the cameras together as a rigid rig (try if SfM fails)"
     )
     a.add_argument("--live", action="store_true", help="open Brush's live training viewer window")
@@ -562,7 +573,7 @@ def cmd_recon(args) -> None:
     timings = {k: v for k, v in timings.items() if k in ("sfm", "undistort")}  # only the stages we reuse
     t0 = time.perf_counter()
     if not args.skip_sfm:
-        model = recon.sfm(work, args.global_mapper, not args.no_rig)
+        model = recon.sfm(work, args.global_mapper, not args.no_rig, args.gps_priors, args.gps_sigma)
         timings["sfm"] = time.perf_counter() - t0
         t0 = time.perf_counter()
         dense = recon.undistort(work, model)
@@ -614,6 +625,8 @@ def cmd_recon(args) -> None:
             {
                 "steps": args.steps,
                 "global_mapper": args.global_mapper,
+                "gps_priors": args.gps_priors,
+                "gps_sigma": args.gps_sigma,
                 "rig": not args.no_rig,
                 "eval": args.eval,
                 "eval_split": "time" if args.eval else None,

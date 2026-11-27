@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 from scipy.spatial import cKDTree
 
-from . import brush
+from . import brush, gps_priors
 from .splats import CAM_HEIGHT_M
 
 
@@ -32,12 +32,20 @@ def _registered(model: Path) -> int:
     return struct.unpack("<Q", head)[0] if len(head) == 8 else 0
 
 
-def _map(work: Path, db: Path, out: Path, global_mapper: bool, *extra: str) -> Path | None:
+def _map(
+    work: Path,
+    db: Path,
+    out: Path,
+    global_mapper: bool,
+    *extra: str,
+    pose_priors: bool = False,
+) -> Path | None:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    sh(
+    mapper = "pose_prior_mapper" if pose_priors else ("global_mapper" if global_mapper else "mapper")
+    cmd = [
         "colmap",
-        "global_mapper" if global_mapper else "mapper",
+        mapper,
         "--database_path",
         str(db),
         "--image_path",
@@ -45,14 +53,59 @@ def _map(work: Path, db: Path, out: Path, global_mapper: bool, *extra: str) -> P
         "--output_path",
         str(out),
         *extra,
-    )
+    ]
+    if pose_priors:
+        cmd += ["--use_robust_loss_on_prior_position", "1"]
+    sh(*cmd)
     models = [d for d in out.iterdir() if _registered(d)]
     return max(models, key=_registered) if models else None
 
 
-def sfm(work: Path, global_mapper: bool = False, rig: bool = True) -> Path:
+def _apply_gps_priors(work: Path, db: Path, sigma_h_m: float) -> bool:
+    """Attach ENU GPS priors from viewer/telemetry.json to `colmap.db`. Returns True if applied."""
+    tel_path = work / "viewer" / "telemetry.json"
+    meta_path = work / "meta.json"
+    if not tel_path.is_file() or not meta_path.is_file():
+        print("gps-priors: skipped (missing telemetry.json or meta.json); running standard mapper")
+        return False
+    tel = json.loads(tel_path.read_text())
+    meta = json.loads(meta_path.read_text())
+    fps = float(meta.get("fps") or 0)
+    cams = meta.get("cams") or []
+    ref = "front" if "front" in cams else (cams[0] if cams else "front")
+    frames = sorted((work / "images" / ref).glob("*.jpg"))
+    if fps <= 0 or not frames:
+        print("gps-priors: skipped (no reference frames); running standard mapper")
+        return False
+    frame_times = {int(f.stem): int(f.stem) / fps for f in frames}
+    try:
+        frame_enu, origin = gps_priors.sample_frame_enu(tel, frame_times)
+        n = gps_priors.write_pose_priors(db, frame_enu, sigma_h_m=sigma_h_m, ref_cam=ref)
+    except ValueError as e:
+        print(f"gps-priors: skipped ({e}); running standard mapper")
+        return False
+    if n < 2:
+        print(f"gps-priors: skipped (only {n} matching image priors); running standard mapper")
+        return False
+    (work / "gps_priors.json").write_text(
+        json.dumps({"origin": [origin[0], origin[1]], "priors": n, "sigma_h_m": sigma_h_m})
+    )
+    print(f"gps-priors: wrote {n} ENU priors (sigma={sigma_h_m:g} m) to colmap.db")
+    return True
+
+
+def sfm(
+    work: Path,
+    global_mapper: bool = False,
+    rig: bool = True,
+    gps_priors: bool = False,
+    gps_sigma_m: float = 4.0,
+) -> Path:
     """Features -> rig-aware pairs -> mapping. With rig=True all cameras are tied together as one
     rigid rig (approximate Tesla layout as a prior), which keeps all cameras in a single model."""
+    if gps_priors and global_mapper:
+        raise SystemExit("--gps-priors uses COLMAP's pose_prior_mapper, which cannot be combined with --global-mapper")
+    (work / "gps_priors.json").unlink(missing_ok=True)
     db = work / "colmap.db"
     if db.exists():
         db.unlink()
@@ -86,7 +139,8 @@ def sfm(work: Path, global_mapper: bool = False, rig: bool = True) -> Path:
         "--FeatureMatching.use_gpu",
         "0",
     )
-    best = _map(work, db, work / "sparse", global_mapper)
+    use_priors = _apply_gps_priors(work, db, gps_sigma_m) if gps_priors else False
+    best = _map(work, db, work / "sparse", global_mapper, pose_priors=use_priors)
     if best is None:
         raise SystemExit(
             "COLMAP could not register the images. Try a window where the car is moving "
@@ -396,7 +450,10 @@ def export_path(work: Path, dense: Path) -> Path:
 
     tel = json.loads((work / "viewer" / "telemetry.json").read_text())
     units = float(np.linalg.norm(np.diff(Ps, axis=0), axis=1).sum())
-    scale, scale_source = scale_estimate(tel, path[0]["t"], path[-1]["t"], units)
+    if (work / "gps_priors.json").is_file():
+        scale, scale_source = 1.0, "gps-priors"
+    else:
+        scale, scale_source = scale_estimate(tel, path[0]["t"], path[-1]["t"], units)
     cam_h = fit_cam_height(read_points(dense), Ps, up, scale)
     out = work / "viewer" / "path.json"
     doc = {

@@ -340,7 +340,7 @@ const M = 1 / path.metresPerUnit;          // metres -> scene units
 const UP = new THREE.Vector3(...path.up);
 const frames = path.frames.map((f) => ({ t: f.t, p: new THREE.Vector3(...f.p), f: new THREE.Vector3(...f.f) }));
 const DUR = path.dur;
-const scaleNote = path.scaleSource && path.scaleSource !== "telemetry" ? " · estimated scale" : "";
+const scaleNote = path.scaleSource && !["telemetry", "gps-priors"].includes(path.scaleSource) ? " · estimated scale" : "";
 $("metaSub").textContent = `${path.cams.length} cameras · gaussian splat${scaleNote}`;
 $("tdur").textContent = fmt(DUR);
 

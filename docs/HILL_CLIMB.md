@@ -157,3 +157,16 @@ otrv bench $N --note "v1 control (fps 3)"
 9. On Brush main: `--lpips-loss-weight 0.05` (its default there) vs 0. Not on v0.3.0: it aborts.
 
 Steps 2-6, 8 and 9 are `--skip-sfm` runs (~75 min each); step 1 adds SfM; step 7 takes seconds.
+
+
+### What the quality score establishes
+
+These scores are conditional on the camera reconstruction: COLMAP estimates camera poses and sparse
+geometry before the Brush train/eval split. The split holds images out of Brush fitting, not out of
+COLMAP. Do not describe these metrics as an independent end-to-end reconstruction test. The benchmark
+rejects missing camera/time renders defined by prep, or renders without matching ground truth.
+
+A blind comparison needs cameras/timestamps fixed before any scene fitting, known poses from an
+independent rig/trajectory or independently estimated for scoring against frozen geometry, and unseen
+drives reserved for the final test. Compare missing views and the reconstruction of stable geometry
+separately from appearance metrics and from any diffusion-enhanced output.

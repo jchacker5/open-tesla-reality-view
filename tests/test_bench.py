@@ -222,3 +222,46 @@ def test_colour_corrected_psnr_factors_out_exposure(tmp_path):
     v = bench.view_metrics(work, {"eval": True, "steps": 100})
     assert v["psnr"]["overall"] < 25 and v["psnr_cc"]["overall"] > 40
     assert v["psnr_cc"]["per_cam"]["front"] == v["psnr_cc"]["overall"]
+
+
+def test_eval_cannot_omit_the_unregistered_camera(tmp_path):
+    work = tmp_path / "run"
+    gt = work / "dense" / "images" / "front"
+    gt.mkdir(parents=True)
+    ev = work / "splat" / "eval_100"
+    ev.mkdir(parents=True)
+    Image.new("RGB", (16, 16)).save(gt / "front_00004.jpg")
+    Image.new("RGB", (16, 16)).save(ev / "front_00004.png")
+    (work / "meta.json").write_text(json.dumps({"cams": ["front", "back"], "fps": 3, "dur": 2}))
+    (work / "eval.json").write_text(json.dumps({"eval": ["front_00004"], "guard": []}))
+    with pytest.raises(ValueError, match="missing planned"):
+        bench.view_metrics(work, {"eval": True, "steps": 100})
+
+
+def test_eval_cannot_silently_drop_render_without_ground_truth(tmp_path):
+    work = tmp_path / "run"
+    gt = work / "dense" / "images" / "front"
+    gt.mkdir(parents=True)
+    ev = work / "splat" / "eval_100"
+    ev.mkdir(parents=True)
+    Image.new("RGB", (16, 16)).save(gt / "front_00004.jpg")
+    for stem in ("front_00004", "front_00005"):
+        Image.new("RGB", (16, 16)).save(ev / f"{stem}.png")
+    with pytest.raises(FileNotFoundError, match="ground truth"):
+        bench.view_metrics(work, {"eval": True, "steps": 100})
+
+
+def test_eval_does_not_expect_frame_past_extracted_end(tmp_path):
+    work = tmp_path / "run"
+    gt = work / "dense" / "images" / "front"
+    gt.mkdir(parents=True)
+    ev = work / "splat" / "eval_100"
+    ev.mkdir(parents=True)
+    stems = ["front_00005", "front_00016"]
+    for stem in stems:
+        Image.new("RGB", (16, 16)).save(gt / f"{stem}.jpg")
+        Image.new("RGB", (16, 16)).save(ev / f"{stem}.png")
+    meta = {"cams": ["front"], "fps": 4, "dur": 6.75, "frames": {"front": 27}}
+    (work / "meta.json").write_text(json.dumps(meta))
+    (work / "eval.json").write_text(json.dumps({"eval": stems, "guard": []}))
+    assert bench.view_metrics(work, {"eval": True, "steps": 100})["psnr"]["views"] == 2

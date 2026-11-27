@@ -34,6 +34,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from . import holdout
+
 # A run must pass these before it can become the new best. Tune as the project improves.
 GATES = {
     "min_registration": 0.90,  # every camera
@@ -201,14 +203,29 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
     evals = work / "splat" / f"eval_{steps}"
     if not evals.is_dir():
         raise FileNotFoundError(f"recon ran with --eval but {evals} is missing (Brush saved no eval renders)")
+    renders = sorted(evals.glob("*.png"))
+    meta_path = work / "meta.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    if all(key in meta for key in ("cams", "fps", "dur")):
+        frame_ids = {round(t * meta["fps"]) for t in holdout.eval_times(meta["dur"])}
+        counts = meta.get("frames", {})
+        default_count = round(meta["dur"] * meta["fps"])
+        planned = {
+            f"{cam}_{idx:05d}" for cam in meta["cams"] for idx in frame_ids if idx < counts.get(cam, default_count)
+        }
+        missing_planned = planned - {r.stem for r in renders}
+        if missing_planned:
+            raise ValueError(
+                f"missing planned evaluation views: {len(missing_planned)} ({', '.join(sorted(missing_planned)[:3])})"
+            )
     dense = gt_root(work)
     rows: dict[str, list[dict]] = {}
     sky_excluded = False
-    for render in sorted(evals.glob("*.png")):
+    for render in renders:
         cam = render.stem.rsplit("_", 1)[0]
         gt_path = _gt_image(dense, cam, render.stem)
         if gt_path is None:
-            continue
+            raise FileNotFoundError(f"missing ground truth for evaluation view {render.stem}")
         pred_img = Image.open(render).convert("RGB")
         gt = np.asarray(Image.open(gt_path).convert("RGB").resize(pred_img.size, Image.LANCZOS), np.float32) / 255
         pred = np.asarray(pred_img, np.float32) / 255
@@ -230,7 +247,7 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
         raise FileNotFoundError(f"no eval render in {evals} matches an image in {dense / 'images'}")
     split = json.loads((work / "eval.json").read_text()) if (work / "eval.json").exists() else None
     if split is not None:  # Brush must have held out exactly the views recon chose
-        rendered = {r.stem for r in evals.glob("*.png")}
+        rendered = {r.stem for r in renders}
         extra, missing = rendered - set(split["eval"]), set(split["eval"]) - rendered
         if extra or missing:
             raise ValueError(

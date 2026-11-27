@@ -194,6 +194,8 @@ def test_install_viewer_copies_modules_and_user_model(tmp_path, monkeypatch):
     vd.mkdir()
     cli.install_viewer(vd)
     assert (vd / "index.html").is_file() and (vd / "car.js").is_file()
+    assert (vd / "vendor" / "three" / "three.module.min.js").is_file()
+    assert (vd / "vendor" / "spark" / "spark.module.min.js").is_file()
     assert (vd / "models" / "car.glb").read_bytes() == b"glTF"
 
     assert json.loads((vd / "features.json").read_text()) == {"collision": False, "model": True, "sounds": []}

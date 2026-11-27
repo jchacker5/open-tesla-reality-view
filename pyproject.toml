@@ -71,6 +71,7 @@ packages = ["tsplat"]
 [tool.hatch.build.targets.wheel.force-include]
 "viewer/index.html" = "tsplat/viewer/index.html"
 "viewer/car.js" = "tsplat/viewer/car.js"
+"viewer/vendor" = "tsplat/viewer/vendor"
 
 [build-system]
 requires = ["hatchling"]

@@ -248,9 +248,9 @@
 </div>
 <script type="importmap">
 { "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-  "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.2.0/dist/spark.module.js"
+  "three": "./vendor/three/three.module.min.js",
+  "three/addons/": "./vendor/three/addons/",
+  "@sparkjsdev/spark": "./vendor/spark/spark.module.min.js"
 } }
 </script>
 <script type="module">
@@ -464,8 +464,8 @@ const carLoaded = (async () => {
       import("three/addons/loaders/GLTFLoader.js"), import("three/addons/libs/meshopt_decoder.module.js"),
       import("three/addons/loaders/DRACOLoader.js"), import("three/addons/loaders/KTX2Loader.js")]);
     const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder)
-      .setDRACOLoader(new DRACOLoader().setDecoderPath("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/draco/gltf/"))
-      .setKTX2Loader(new KTX2Loader().setTranscoderPath("https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/libs/basis/").detectSupport(renderer));
+      .setDRACOLoader(new DRACOLoader().setDecoderPath("./vendor/three/addons/libs/draco/gltf/"))
+      .setKTX2Loader(new KTX2Loader().setTranscoderPath("./vendor/three/addons/libs/basis/").detectSupport(renderer));
     const gltf = await loader.loadAsync("models/" + parts.map(encodeURIComponent).join("/"));
     const api = fitModelCar(THREE, gltf.scene, cfg);
     car.remove(carApi.group);

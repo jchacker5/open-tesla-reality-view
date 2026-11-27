@@ -393,6 +393,15 @@ def scale_estimate(tel: list[dict], t0: float, t1: float, units: float) -> tuple
     return 11.0 * (t1 - t0) / units, "assumed-speed"  # no SEI: assume ~11 m/s (25 mph)
 
 
+def smooth_path(P: np.ndarray, k: int = 2) -> np.ndarray:
+    """Centred moving average over 2k+1 samples. Near the ends the window shrinks symmetrically
+    (radius min(k, i, n-1-i)), so the first and last samples stay where they were measured. A
+    window truncated on one side only would pull them inward, which shortens the path and inflates
+    the speed-derived metres-per-unit (by ~4% on 20 s drives at 3 fps)."""
+    n = len(P)
+    return np.array([P[i - r : i + r + 1].mean(0) for i in range(n) for r in [min(k, i, n - 1 - i)]])
+
+
 def export_path(work: Path, dense: Path) -> Path:
     """viewer/path.json: the car's trajectory per sampled frame (mean of registered camera centres,
     smoothed), heading from the trajectory tangent, scene up, and metres-per-unit from SEI speed."""
@@ -419,8 +428,7 @@ def export_path(work: Path, dense: Path) -> Path:
     P = np.array([np.mean(centres[i], 0) for i in idxs])
     if not np.isfinite(P).all() or not np.isfinite(meta["fps"]) or meta["fps"] <= 0:
         raise SystemExit("camera path requires finite poses and a positive sample rate")
-    k = 2  # moving-average smoothing
-    Ps = np.array([P[max(0, i - k) : i + k + 1].mean(0) for i in range(len(P))])
+    Ps = smooth_path(P)
     F = np.gradient(Ps, axis=0)
     lengths = np.linalg.norm(F, axis=1)
     moving = np.flatnonzero(lengths > 1e-9)

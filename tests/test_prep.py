@@ -278,3 +278,73 @@ def test_reprep_deletes_downstream_state(tmp_path, monkeypatch):
     assert "run `otrv recon drive` first" in refused("view", "drive")
     assert "run `otrv recon drive` first" in refused("bench", "drive")
     assert "run `otrv recon drive` first" in refused("recon", "drive", "--skip-sfm")
+
+
+def test_resolve_clips_explicit_and_stitch_chaining():
+    c1 = {"id": "2026-01-02_03-04-00", "timestamp": "2026-01-02_03-04-00", "kind": "RecentClips", "seconds": 60.0}
+    c2 = {"id": "2026-01-02_03-05-00", "timestamp": "2026-01-02_03-05-00", "kind": "RecentClips", "seconds": 60.0}
+    c3 = {"id": "2026-01-02_03-08-00", "timestamp": "2026-01-02_03-08-00", "kind": "RecentClips", "seconds": 60.0}
+    clips = [c1, c2, c3]
+    assert prep.resolve_clips(clips, [c1["id"], c2["id"]], 0, 90) == [c1, c2]
+    assert prep.resolve_clips(clips, f"{c1['id']},{c2['id']}", 0, 90) == [c1, c2]
+    assert prep.resolve_clips(clips, c1["id"], 40, 40, stitch=True) == [c1, c2]
+    # Gap between c2 (ends 03:06:00) and c3 (03:08:00) is > 5 s, so chaining stops at c2.
+    assert prep.resolve_clips(clips, c1["id"], 40, 100, stitch=True) == [c1, c2]
+
+
+def test_stitch_telemetry_keeps_continuous_time_across_clips(monkeypatch, tmp_path):
+    a, b = tmp_path / "a.mp4", tmp_path / "b.mp4"
+    rows_by = {
+        str(a): [{"frame_seq_no": 100 + i, "vehicle_speed_mps": 10.0} for i in range(10)],
+        str(b): [{"frame_seq_no": 0 + i, "vehicle_speed_mps": 15.0} for i in range(10)],
+    }
+    monkeypatch.setattr(prep.sei, "extract", lambda p: rows_by[p])
+    monkeypatch.setattr(prep, "video_fps", lambda p: 10.0)
+    tel = prep._stitch_telemetry([a, b], start=0.5, dur=1.2)
+    assert tel[0]["t"] == 0.0 and tel[0]["mph"] == pytest.approx(22.4, abs=0.1)
+    assert tel[-1]["t"] == pytest.approx(1.2, abs=0.05) and tel[-1]["mph"] == pytest.approx(33.6, abs=0.1)
+    assert all(x["t"] < y["t"] for x, y in zip(tel, tel[1:], strict=False))
+
+
+def test_prep_stitches_two_real_clips_with_ffmpeg(tmp_path):
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    data = tmp_path / "data"
+    data.mkdir()
+    clips = []
+    for idx, ts in enumerate(("2026-01-02_03-04-00", "2026-01-02_03-04-03")):
+        cams = {}
+        for cam in ("front", "back"):
+            p = data / f"{ts}-{cam}.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", f"color=c={'blue' if idx == 0 else 'red'}:s=64x48:r=10:d=3",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(p),
+                ],
+                check=True,
+            )
+            cams[cam] = str(p)
+        clips.append({"id": ts, "timestamp": ts, "kind": "RecentClips", "seconds": 3.0, "cams": cams})
+    (data / "index.json").write_text(json.dumps(clips))
+
+    out = prep.run(
+        str(data / "index.json"),
+        clips[0]["id"],
+        "stitched",
+        start=2.0,
+        dur=2.5,
+        fps=4.0,
+        width=64,
+        movers=False,
+        workdir=str(tmp_path / "work"),
+        stitch=True,
+    )
+    meta = json.loads((out / "meta.json").read_text())
+    assert meta["clips"] == [clips[0]["id"], clips[1]["id"]]
+    assert meta["frames"]["front"] == 10
+    assert not (out / "_stitch").exists()
+    assert (out / "viewer" / "cams" / "front.mp4").is_file()

@@ -13,6 +13,7 @@ work/<name>/
 
 from __future__ import annotations
 
+import datetime as _dt
 import importlib.util
 import io
 import json
@@ -286,7 +287,132 @@ def write_rig_config(out: Path, cams: list[str]) -> None:
     (out / "rig_config.json").write_text(json.dumps([{"cameras": entries}], indent=1))
 
 
-def write_viewer_assets(cams: dict, out: Path, start: float, dur: float) -> None:
+def _clip_time(ts: str) -> _dt.datetime | None:
+    try:
+        return _dt.datetime.strptime(ts, "%Y-%m-%d_%H-%M-%S")
+    except ValueError:
+        return None
+
+
+def resolve_clips(
+    clips: list[dict], clip_ids: str | list[str], start: float, dur: float, stitch: bool = False
+) -> list[dict]:
+    """Resolve one or more clip IDs/timestamps, optionally chaining consecutive clips when `stitch=True`."""
+    tokens = [clip_ids] if isinstance(clip_ids, str) else list(clip_ids)
+    flat = [tok.strip() for item in tokens for tok in item.split(",") if tok.strip()]
+    if not flat:
+        raise SystemExit("pass at least one clip id or timestamp")
+    selected: list[dict] = []
+    for cid in flat:
+        clip = next((c for c in clips if c["id"] == cid or c["timestamp"] == cid), None)
+        if not clip:
+            raise SystemExit(f"clip {cid!r} not in index; run `otrv list` to see clip ids")
+        selected.append(clip)
+    if stitch and len(selected) == 1:
+        total = selected[0].get("seconds") or 60.0
+        while total < start + dur - 0.5:
+            prev = selected[-1]
+            t_prev = _clip_time(prev["timestamp"])
+            prev_dur = prev.get("seconds")
+            if t_prev is None or not prev_dur:
+                break
+            expected = t_prev + _dt.timedelta(seconds=float(prev_dur))
+            nxt = None
+            best_gap = 5.0
+            for c in clips:
+                if c in selected or c.get("kind") != prev.get("kind"):
+                    continue
+                tc = _clip_time(c["timestamp"])
+                if tc is None:
+                    continue
+                gap = abs((tc - expected).total_seconds())
+                if gap <= best_gap:
+                    best_gap, nxt = gap, c
+            if nxt is None:
+                break
+            selected.append(nxt)
+            total += nxt.get("seconds") or 60.0
+    return selected
+
+
+def _concat_mp4s(paths: list[Path], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    lst = out_path.with_suffix(".txt")
+    lines = []
+    for p in paths:
+        escaped = str(p.resolve()).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    lst.write_text("\n".join(lines) + "\n")
+    ff("-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out_path))
+
+
+def _stitch_telemetry(front_paths: list[Path], start: float, dur: float, min_dt: float = 0.1) -> list[dict]:
+    """Extract and concatenate SEI telemetry across consecutive front-camera clips with continuous times."""
+    merged: list[dict] = []
+    offset = 0.0
+    last = -1.0
+    for p in front_paths:
+        rows = sei.extract(str(p))
+        fps = video_fps(str(p))
+        clip_dur = (rows[-1]["frame_seq_no"] - rows[0]["frame_seq_no"] + 1) / fps if rows else 0.0
+        if rows:
+            seq0 = rows[0]["frame_seq_no"]
+            for r in rows:
+                t = offset + (r["frame_seq_no"] - seq0) / fps - start
+                if 0 <= t <= dur and t - last >= min_dt - 1e-9:
+                    last = t
+                    merged.append(
+                        {
+                            "t": round(t, 3),
+                            "mph": round(r.get("vehicle_speed_mps", 0) * 2.23694, 1),
+                            "lat": r.get("latitude_deg"),
+                            "lon": r.get("longitude_deg"),
+                            "heading": r.get("heading_deg"),
+                            "steer": r.get("steering_wheel_angle"),
+                            "gear": r.get("gear"),
+                            "autopilot": r.get("autopilot"),
+                            "brake": r.get("brake_applied", False),
+                            "blinkL": r.get("blinker_on_left", False),
+                            "blinkR": r.get("blinker_on_right", False),
+                        }
+                    )
+        if clip_dur <= 0:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p)],
+                capture_output=True,
+                text=True,
+            )
+            try:
+                clip_dur = float(r.stdout.strip())
+            except ValueError:
+                clip_dur = 0.0
+        offset += clip_dur
+    return merged
+
+
+def stitch_clips(selected: list[dict], out: Path) -> tuple[dict[str, str], list[Path]]:
+    """Return `(cams_dict, front_sources)`. When multiple clips are selected, concatenate each shared
+    camera's MP4s via stream-copy into `out/_stitch/`."""
+    if len(selected) == 1:
+        cams = {c: p for c, p in selected[0]["cams"].items() if c in CAMS}
+        front = [Path(cams["front"])] if "front" in cams else []
+        return cams, front
+    common = [c for c in CAMS if all(c in cl["cams"] for cl in selected)]
+    if not common:
+        raise SystemExit("selected clips share no common cameras to stitch")
+    stitch_dir = out / "_stitch"
+    cams: dict[str, str] = {}
+    for c in common:
+        dest = stitch_dir / f"{c}.mp4"
+        _concat_mp4s([Path(cl["cams"][c]) for cl in selected], dest)
+        cams[c] = str(dest)
+    front_sources = [Path(cl["cams"]["front"]) for cl in selected] if "front" in common else []
+    return cams, front_sources
+
+
+def write_viewer_assets(
+    cams: dict, out: Path, start: float, dur: float, stitched_tel: list[dict] | None = None
+) -> None:
     vd = out / "viewer" / "cams"
     vd.mkdir(parents=True, exist_ok=True)
     for cam, path in cams.items():
@@ -315,8 +441,11 @@ def write_viewer_assets(cams: dict, out: Path, start: float, dur: float) -> None
             str(vd / f"{cam}.mp4"),
         )
 
-    rows = sei.extract(cams["front"]) if "front" in cams else []
-    tel = telemetry(rows, video_fps(cams["front"]), start, dur) if rows else []
+    if stitched_tel is not None:
+        tel = stitched_tel
+    else:
+        rows = sei.extract(cams["front"]) if "front" in cams else []
+        tel = telemetry(rows, video_fps(cams["front"]), start, dur) if rows else []
     (out / "viewer" / "telemetry.json").write_text(json.dumps(tel))
     print(f"telemetry: {len(tel)} samples" if tel else "telemetry: none in this clip (needs fw 2025.44.25+)")
 
@@ -394,6 +523,7 @@ STALE_DIRS = (
     "nvs",
     "_maskimgs",
     "_maskdense",
+    "_stitch",
 )
 STALE_FILES = (
     "colmap.db",
@@ -422,7 +552,7 @@ def clear_stale(out: Path) -> None:
 
 def run(
     index: str,
-    clip_id: str,
+    clip_id: str | list[str],
     name: str,
     start: float,
     dur: float,
@@ -431,39 +561,49 @@ def run(
     movers: bool,
     workdir: str = "work",
     sky_model: bool = False,
+    stitch: bool = False,
 ) -> Path:
     clips = json.loads(Path(index).read_text())
-    clip = next((c for c in clips if c["id"] == clip_id or c["timestamp"] == clip_id), None)
-    if not clip:
-        raise SystemExit(f"clip {clip_id!r} not in {index}; run `otrv list` to see clip ids")
-    check_window(clip, start, dur)
+    selected = resolve_clips(clips, clip_id, start, dur, stitch=stitch)
+    seconds = sum(c["seconds"] for c in selected) if all(c.get("seconds") for c in selected) else None
+    combined = {"id": "+".join(c["id"] for c in selected), "seconds": seconds}
+    check_window(combined, start, dur)
     if movers and importlib.util.find_spec("ultralytics") is None:  # fail before any (slow) extraction
         raise SystemExit("--mask-movers needs ultralytics: run `uv sync --extra movers` (~1 GB PyTorch download)")
     if sky_model and importlib.util.find_spec("transformers") is None:
         raise SystemExit("--sky-model needs transformers: run `uv sync --extra quality` (~1 GB PyTorch download)")
-    cams = {c: p for c, p in clip["cams"].items() if c in CAMS}
     out = Path(workdir) / name
     out.mkdir(parents=True, exist_ok=True)
     clear_stale(out)
-    print(f"[{name}] {len(cams)} cams, {start}s +{dur}s @ {fps} fps")
-    extract_frames(cams, out, start, dur, fps, width)
-    counts = {c: len(list((out / "images" / c).glob("*.jpg"))) for c in cams}
-    if not counts or min(counts.values()) == 0:
-        empty = [c for c, n in counts.items() if n == 0]
-        raise SystemExit(f"ffmpeg extracted no frames for {', '.join(empty) or 'any camera'}; check --start/--dur")
-    actual_dur = round(min(counts.values()) / fps, 3)
-    egodir = Path(index).parent / "egomask"
-    print(ego_mask_summary(egodir, list(cams)))
-    write_masks(out, list(cams), movers, egodir)
-    sky.write(out, list(cams), sky_model)
-    print(f"pairs: {write_pairs(out, list(cams), fps=fps)}")
-    write_rig_config(out, list(cams))
-    write_viewer_assets(cams, out, start, actual_dur)
+    cams, front_sources = stitch_clips(selected, out)
+    try:
+        clip_label = f"{len(selected)} clips, " if len(selected) > 1 else ""
+        print(f"[{name}] {clip_label}{len(cams)} cams, {start}s +{dur}s @ {fps} fps")
+        extract_frames(cams, out, start, dur, fps, width)
+        counts = {c: len(list((out / "images" / c).glob("*.jpg"))) for c in cams}
+        if not counts or min(counts.values()) == 0:
+            empty = [c for c, n in counts.items() if n == 0]
+            raise SystemExit(f"ffmpeg extracted no frames for {', '.join(empty) or 'any camera'}; check --start/--dur")
+        actual_dur = round(min(counts.values()) / fps, 3)
+        egodir = Path(index).parent / "egomask"
+        print(ego_mask_summary(egodir, list(cams)))
+        write_masks(out, list(cams), movers, egodir)
+        sky.write(out, list(cams), sky_model)
+        print(f"pairs: {write_pairs(out, list(cams), fps=fps)}")
+        write_rig_config(out, list(cams))
+        if len(selected) > 1:
+            tel = _stitch_telemetry(front_sources, start, actual_dur) if front_sources else []
+            write_viewer_assets(cams, out, start, actual_dur, stitched_tel=tel)
+        else:
+            write_viewer_assets(cams, out, start, actual_dur)
+    finally:
+        shutil.rmtree(out / "_stitch", ignore_errors=True)
     (out / "meta.json").write_text(
         json.dumps(
             {
-                "clip": clip["id"],
-                "timestamp": clip["timestamp"],
+                "clip": selected[0]["id"],
+                "clips": [c["id"] for c in selected],
+                "timestamp": selected[0]["timestamp"],
                 "start": start,
                 "dur": actual_dur,
                 "requested_dur": dur,

@@ -107,7 +107,10 @@ def _extract_ground_mesh(
         return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32)
 
     a, b, c, d = v00[quad_ok], v10[quad_ok], v11[quad_ok], v01[quad_ok]
-    faces = np.concatenate([np.stack([a, c, b], 1), np.stack([a, d, c], 1)], axis=0).astype(np.int32)
+    if np.dot(np.cross(basis["right"], basis["fwd"]), basis["up"]) >= 0:
+        faces = np.concatenate([np.stack([a, b, c], 1), np.stack([a, c, d], 1)], axis=0).astype(np.int32)
+    else:
+        faces = np.concatenate([np.stack([a, c, b], 1), np.stack([a, d, c], 1)], axis=0).astype(np.int32)
     return pts_scene[keep_idx].astype(np.float32), cell_rgb[keep_idx].astype(np.float32), faces
 
 
@@ -125,7 +128,7 @@ def _extract_structure_mesh(
     u = 1.0 / ego.mpu
     _, height, _ = ego.nearest_road(xyz, across=True)
     lat, _, _ = ego.nearest_road(xyz, across=False)
-    keep = (lat <= corridor_m * u) & (opacity >= 0.25) & (height >= 0.35 * u) & (height <= 10.0 * u)
+    keep = (lat <= corridor_m) & (opacity >= 0.25) & (height >= 0.35) & (height <= 10.0)
     if not keep.any():
         return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32)
 

@@ -74,6 +74,15 @@ def test_export_mesh_ply_and_glb_and_excludes_ego_tube(tmp_path):
     assert (faces >= 0).all() and (faces < len(verts)).all()
     assert not np.any((cols[:, 1] > 0.8) & (cols[:, 0] < 0.2))
 
+    # Ground triangles must face upward (+ego.up).
+    gverts, _, gfaces = mesh._extract_ground_mesh(
+        ply_obj.xyz(), ply_obj.rgb(), ply_obj.opacity(), ego, cell_m=0.25, corridor_m=12.0
+    )
+    assert len(gfaces) > 0
+    tri = gverts[gfaces]
+    norms = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    assert np.all(norms @ ego.up > 0)
+
     glb_out = mesh.run(work, fmt="glb")
     assert glb_out == work / "viewer" / "mesh.glb" and glb_out.is_file()
     glb = glb_out.read_bytes()
@@ -108,3 +117,21 @@ def test_export_mesh_rejects_empty_corridor(tmp_path):
     splats.write_ply(work / "viewer" / "scene.ply", splats.Ply(arr, []))
     with pytest.raises(SystemExit, match="no corridor splats"):
         mesh.run(work)
+
+
+def test_structure_mesh_uses_metre_thresholds_when_mpu_scaled(tmp_path):
+    # 1 scene unit = 0.1 m (10 units per metre): road is at y = 14.0 (1.4 m below origin).
+    frames = [{"t": float(i), "p": [0.0, 0.0, float(i) * 10.0], "f": [0.0, 0.0, 1.0]} for i in range(6)]
+    ego = splats.EgoPath.from_dict({"up": [0.0, -1.0, 0.0], "metresPerUnit": 0.1, "camHeight": 1.4, "frames": frames})
+    # Place one cluster at lateral=3.0 m (x=30), height=1.5 m above road (y=-1.0), which MUST pass;
+    # and one at lateral=15.0 m (x=150) outside 12 m corridor, which MUST be excluded.
+    xyz = np.array(
+        [[30.0, -1.0, 20.0], [30.1, -1.0, 20.0], [150.0, -1.0, 20.0], [150.1, -1.0, 20.0]],
+        np.float32,
+    )
+    rgb = np.array([[0.9, 0.1, 0.1], [0.9, 0.1, 0.1], [0.1, 0.1, 0.9], [0.1, 0.1, 0.9]], np.float32)
+    op = np.full(4, 0.9, np.float32)
+    sverts, scols, sfaces = mesh._extract_structure_mesh(xyz, rgb, op, ego, voxel_m=0.35, corridor_m=12.0)
+    assert len(sverts) > 0 and len(sfaces) > 0
+    assert sverts[:, 0].max() < 50.0
+    assert scols[:, 0].mean() > 0.7

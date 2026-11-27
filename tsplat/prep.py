@@ -400,6 +400,7 @@ STALE_FILES = (
     "sky.json",
     "viewer/collision.json",
     "recon_args.json",
+    "gps_priors.json",
     "timings.json",
     "metrics.json",
     "clean.json",

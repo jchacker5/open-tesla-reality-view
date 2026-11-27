@@ -208,11 +208,16 @@ def view_metrics(work: Path, recon_args: dict, lpips_fn=None) -> dict | None:
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     if all(key in meta for key in ("cams", "fps", "dur")):
         frame_ids = {round(t * meta["fps"]) for t in holdout.eval_times(meta["dur"])}
-        planned = {f"{cam}_{idx:05d}" for cam in meta["cams"] for idx in frame_ids}
+        counts = meta.get("frames", {})
+        default_count = round(meta["dur"] * meta["fps"])
+        planned = {
+            f"{cam}_{idx:05d}" for cam in meta["cams"] for idx in frame_ids if idx < counts.get(cam, default_count)
+        }
         missing_planned = planned - {r.stem for r in renders}
         if missing_planned:
-            raise ValueError(f"missing planned evaluation views: {len(missing_planned)} "
-                             f"({', '.join(sorted(missing_planned)[:3])})")
+            raise ValueError(
+                f"missing planned evaluation views: {len(missing_planned)} ({', '.join(sorted(missing_planned)[:3])})"
+            )
     dense = gt_root(work)
     rows: dict[str, list[dict]] = {}
     sky_excluded = False

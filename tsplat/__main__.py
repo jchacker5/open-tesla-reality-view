@@ -43,6 +43,7 @@ from . import (
     georef,
     holdout,
     ingest,
+    mesh,
     prep,
     recon,
     render,
@@ -408,6 +409,16 @@ def build_parser() -> argparse.ArgumentParser:
     a = cmd("nvs-export", "posed frames + chase-cam trajectory for a novel-view model (e.g. ViewNeXt)")
     a.add_argument("name", help="run name")
     a.add_argument("--fps", type=float, default=10, help="chase-cam target poses per second")
+
+    a = cmd("export-mesh", "export a coloured .ply or .glb triangle mesh of the reconstructed corridor")
+    a.add_argument("name", help="run name")
+    a.add_argument("--out", type=Path, help="output mesh path (default: work/<name>/viewer/mesh.<format>)")
+    a.add_argument("--format", choices=("ply", "glb"), default="ply", help="mesh file format")
+    a.add_argument("--cell", type=float, default=0.25, help="ground heightfield cell size, metres")
+    a.add_argument("--voxel", type=float, default=0.35, help="above-ground structure voxel size, metres")
+    a.add_argument("--corridor", type=float, default=12.0, help="corridor half-width around the path, metres")
+    a.add_argument("--metres", action="store_true", help="scale vertices to metres relative to road start")
+    a.add_argument("--source", choices=("auto", "splat", "visloc"), default="auto", help="mesh source")
 
     a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
     a.add_argument("name", help="run name")
@@ -781,6 +792,17 @@ def dispatch(args) -> None:
     elif c == "nvs-export":
         need_recon(args.name, "dense/sparse/images.txt", "viewer/path.json")
         recon.export_nvs(WORK / args.name, args.fps)
+    elif c == "export-mesh":
+        mesh.run(
+            need_recon(args.name, "viewer/scene.ply", "viewer/path.json"),
+            out=args.out,
+            fmt=args.format,
+            cell_m=args.cell,
+            voxel_m=args.voxel,
+            corridor_m=args.corridor,
+            metres=args.metres,
+            source=args.source,
+        )
     elif c == "view":
         cmd_view(args)
     elif c == "render":

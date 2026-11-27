@@ -94,9 +94,26 @@ at a bad reconstruction or bad GPS; `otrv georef` says so when they differ by mo
 
 Tests: synthetic drives (a straight road and a 90° turn) under an arbitrary similarity, with
 10 Hz GPS, 1 m receiver noise and 10% multipath jumps. Scale comes back within 2% and every
-position within 2 m, the jumps are rejected, and each rejection path is exercised. Not yet
-run on real footage: the clips on this machine have no SEI telemetry, so the first real check is
-`otrv georef` on a drive recorded with firmware 2025.44.25+.
+position within 2 m, the jumps are rejected, and each rejection path is exercised.
+
+First run on real footage: three 20-second drives from a 4-camera (HW3) car, path sampled at 3 fps,
+GPS from the SEI telemetry. All three fits were accepted.
+
+| Scene | Inliers / matched | RMS (max) residual | GPS scale / speed scale |
+| --- | --- | --- | --- |
+| bridge | 58 / 59 | 0.75 m (2.6 m) | 1.047 |
+| residential | 58 / 59 | 0.60 m (1.9 m) | 1.050 |
+| street | 58 / 59 | 0.50 m (2.3 m) | 1.046 |
+
+Each path has 60 samples; the one without a match is t = 0, before the first GPS fix (the fit
+never extrapolates). The georeferenced tracks sit on the streets the car drove, 0.5-0.7 m on
+average from the nearest raw fix. The scale ratios compare against the `metresPerUnit` these runs
+were reconstructed with, by an earlier build. The current `recon` gives a speed scale about 4%
+higher (ratios 0.958, 0.962, 0.962), and the gap is in the speed scale, not the GPS fit: the
+path's moving-average smoothing truncates its window at both ends, which pulls the end samples
+inward (the first and last steps are half the usual length), shortens the path and inflates the
+speed scale. With two samples dropped from each end of both estimates, the GPS scale moves by
+under 0.3% and the two agree within 1% (0.991, 0.998, 0.993).
 
 ## CPU splat renderer
 

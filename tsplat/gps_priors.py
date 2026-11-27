@@ -119,9 +119,15 @@ def write_pose_priors(
         raise ValueError("GPS prior standard deviations must be positive")
     cov = struct.pack(
         "<9d",
-        sigma_h_m**2, 0.0, 0.0,
-        0.0, sigma_h_m**2, 0.0,
-        0.0, 0.0, sigma_v_m**2,
+        sigma_h_m**2,
+        0.0,
+        0.0,
+        0.0,
+        sigma_h_m**2,
+        0.0,
+        0.0,
+        0.0,
+        sigma_v_m**2,
     )
     conn = sqlite3.connect(db_path)
     try:

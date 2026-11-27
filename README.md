@@ -16,9 +16,9 @@ never leaves your machine.
 [![Release](https://img.shields.io/github/v/release/jchacker5/open-tesla-reality-view?color=3d7bff)](https://github.com/jchacker5/open-tesla-reality-view/releases)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-3ecf8e)](CONTRIBUTING.md)
 
-<img src="docs/media/hero.gif" alt="Chase-cam replay of a real drive rebuilt as a Gaussian splat from a Tesla's dashcam cameras: houses along the road, a car model on the reconstructed street, a blue path ribbon ahead, speed in the corner" width="760">
+<img src="docs/media/hero.gif" alt="Chase-cam replay of a real drive rebuilt as a Gaussian splat from a Tesla's dashcam cameras: a white crossover model drives down a reconstructed two-lane street past houses, a fence and a crosswalk sign, with a blue path ribbon ahead" width="760">
 
-<sub>A real 20-second drive at about 28 mph, rebuilt from a 4-camera (HW3) car's dashcam footage.</sub>
+<sub>The first 10 seconds of a real drive at about 27 mph, rebuilt from a 4-camera (HW3) car's dashcam footage. The white car is the viewer's built-in model; the street around it is the splat.</sub>
 
 <img src="docs/media/driver.jpg" alt="Driver-seat view inside the reconstruction: wooden triple-decker houses, power lines and parked cars along a two-lane street, speed and steering angle in the corner" width="760">
 

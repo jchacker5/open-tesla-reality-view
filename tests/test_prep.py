@@ -321,9 +321,20 @@ def test_prep_stitches_two_real_clips_with_ffmpeg(tmp_path):
             p = data / f"{ts}-{cam}.mp4"
             subprocess.run(
                 [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-f", "lavfi", "-i", f"color=c={'blue' if idx == 0 else 'red'}:s=64x48:r=10:d=3",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(p),
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    f"color=c={'blue' if idx == 0 else 'red'}:s=64x48:r=10:d=3",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(p),
                 ],
                 check=True,
             )

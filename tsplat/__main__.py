@@ -296,9 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
     a = cmd("egomask", "optional: build per-camera car-body masks from many clips (once; ~1-2 s per clip)", data=True)
     a.add_argument("--max-clips", type=int, default=40, help="clips to sample (one frame per camera from each)")
 
-    a = cmd("prep", "extract frames, masks, rig prior and telemetry for a clip window (~1-2 min)", data=True)
-    a.add_argument("clip", help="clip id or timestamp from `otrv list` / `otrv suggest`")
+    a = cmd("prep", "extract frames, masks, rig prior and telemetry for one or more clips (~1-2 min)", data=True)
+    a.add_argument("clip", nargs="+", help="clip id(s) or timestamp(s) from `otrv list` / `otrv suggest`")
     a.add_argument("--name", required=True, help="run name; outputs go to work/<name>/")
+    a.add_argument(
+        "--stitch",
+        action="store_true",
+        help="when one clip is passed and --start + --dur runs past its end, chain consecutive clips",
+    )
     a.add_argument("--start", type=float, default=0, help="window start, in seconds into the clip")
     a.add_argument("--dur", type=float, default=20, help="window length in seconds (recon time grows with it)")
     a.add_argument(
@@ -790,6 +795,7 @@ def dispatch(args) -> None:
             args.width,
             args.mask_movers,
             sky_model=args.sky_model,
+            stitch=args.stitch,
         )
     elif c == "recon":
         cmd_recon(args)

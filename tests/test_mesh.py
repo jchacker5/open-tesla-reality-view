@@ -35,9 +35,13 @@ def _make_scene_and_path(work):
     n = len(pts)
     dt = np.dtype(
         [
-            ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+            ("x", "<f4"),
+            ("y", "<f4"),
+            ("z", "<f4"),
             ("opacity", "<f4"),
-            ("f_dc_0", "<f4"), ("f_dc_1", "<f4"), ("f_dc_2", "<f4"),
+            ("f_dc_0", "<f4"),
+            ("f_dc_1", "<f4"),
+            ("f_dc_2", "<f4"),
         ]
     )
     arr = np.empty(n, dtype=dt)

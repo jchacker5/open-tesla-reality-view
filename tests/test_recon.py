@@ -215,3 +215,26 @@ def test_train_fails_clearly_when_final_splat_missing(fake_brush, monkeypatch):
     with pytest.raises(SystemExit, match="splat_8000.ply"):
         recon.train(fake_brush, fake_brush / "dense", 8000, viewer=False)
     assert not (fake_brush / "viewer" / "scene.ply").exists()
+
+
+def test_path_smoothing_keeps_ends_in_place():
+    """Smoothing must not pull the end samples inward: a straight, constant-speed path comes out
+    unchanged, so the path length (and the speed scale) is not shortened."""
+    P = np.stack([np.zeros(10), np.zeros(10), np.arange(10.0)], 1)
+    assert np.allclose(recon.smooth_path(P), P)
+    rng = np.random.default_rng(0)
+    noisy = P + rng.normal(0, 0.05, P.shape)
+    S = recon.smooth_path(noisy)
+    assert np.allclose(S[[0, -1]], noisy[[0, -1]])  # ends kept, not averaged inward
+    steps = np.linalg.norm(np.diff(S, axis=0), axis=1)
+    assert steps.min() > 0.8  # no half-length first/last step
+
+
+def test_export_path_scale_not_inflated_at_path_ends(tmp_path):
+    """10 frames, 1 unit apart, 10 m/s for 9 s = 90 m over 9 units: exactly 10 m/unit. The old
+    one-sided window at the ends shortened the path to 7 units and read 12.9 m/unit."""
+    tel = [{"t": i / 10, "mph": 22.3694} for i in range(91)]
+    work = make_work(tmp_path, n=10, tel=tel)
+    path = json.loads(recon.export_path(work, work / "dense").read_text())
+    assert [f["p"][2] for f in path["frames"]] == pytest.approx(list(range(10)), abs=1e-6)
+    assert path["metresPerUnit"] == pytest.approx(10.0, rel=1e-4)

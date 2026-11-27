@@ -108,12 +108,19 @@ GPS from the SEI telemetry. All three fits were accepted.
 Each path has 60 samples; the one without a match is t = 0, before the first GPS fix (the fit
 never extrapolates). The georeferenced tracks sit on the streets the car drove, 0.5-0.7 m on
 average from the nearest raw fix. The scale ratios compare against the `metresPerUnit` these runs
-were reconstructed with, by an earlier build. The current `recon` gives a speed scale about 4%
-higher (ratios 0.958, 0.962, 0.962), and the gap is in the speed scale, not the GPS fit: the
-path's moving-average smoothing truncates its window at both ends, which pulls the end samples
-inward (the first and last steps are half the usual length), shortens the path and inflates the
-speed scale. With two samples dropped from each end of both estimates, the GPS scale moves by
-under 0.3% and the two agree within 1% (0.991, 0.998, 0.993).
+were reconstructed with, by an earlier build. Re-exporting the paths with the scale code that
+followed gave ratios of 0.958, 0.962 and 0.962. Its moving-average smoothing cut the window off on
+one side at both ends, which pulled the end samples inward (the first and last steps were half the
+usual length), shortened the path and inflated the speed scale by about 4%. With the window now
+shrinking symmetrically at the ends, re-exporting the same three reconstructions gives:
+
+| Scene | Inliers / matched | RMS (max) residual | GPS scale / speed scale |
+| --- | --- | --- | --- |
+| bridge | 59 / 59 | 0.64 m (2.07 m) | 0.991 |
+| residential | 59 / 59 | 0.52 m (1.25 m) | 0.998 |
+| street | 59 / 59 | 0.36 m (0.66 m) | 0.993 |
+
+The GPS scale moves by under 0.2%; the two independent scales now agree within 1%.
 
 ## CPU splat renderer
 

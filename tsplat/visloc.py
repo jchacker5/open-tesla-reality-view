@@ -234,6 +234,8 @@ def run(work: Path, steps: int = 15000, rules=None) -> Path:
 
     cams = json.loads((work / "meta.json").read_text()).get("cams", []) if (work / "meta.json").is_file() else []
     _rewrite_image_names(dense / "sparse" / "images.txt", cams)
+    shutil.rmtree(work / "sparse", ignore_errors=True)
+    shutil.copytree(sparse0, work / "sparse" / "0")
     for src in sorted(img_dir.glob("*.jpg")):
         cam = next((c for c in sorted(cams, key=len, reverse=True) if src.name.startswith(f"{c}_")), None)
         if cam:

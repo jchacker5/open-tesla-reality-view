@@ -175,6 +175,10 @@ def test_visloc_run_and_cli_recon(monkeypatch, tmp_path):
     )
     (work / "viewer").mkdir(parents=True, exist_ok=True)
     (work / "viewer" / "telemetry.json").write_text(json.dumps([{"t": i * 0.5, "mph": 25.0} for i in range(8)]))
+    # Stale COLMAP artifacts from a prior run must be cleared when switching to visloc.
+    (work / "gps_priors.json").write_text(json.dumps({"priors": 5}))
+    (work / "sparse" / "0").mkdir(parents=True, exist_ok=True)
+    (work / "sparse" / "0" / "stale.txt").write_text("stale")
 
     # Stub gsplat_photos binary via a helper script in the test dir
     stub = tmp_path / "stub_visloc.py"
@@ -214,3 +218,11 @@ def test_visloc_run_and_cli_recon(monkeypatch, tmp_path):
     assert (work / "viewer" / "scene.ply").is_file()
     assert (work / "viewer" / "scene_raw.ply").is_file()
     assert (work / "viewer" / "collision.json").is_file()
+    assert not (work / "gps_priors.json").exists()
+    assert not (work / "sparse" / "0" / "stale.txt").exists()
+    assert (work / "sparse" / "0" / "images.bin").is_file()
+    path_doc = json.loads((work / "viewer" / "path.json").read_text())
+    assert path_doc["scaleSource"] != "gps-priors"
+    from tsplat import bench
+
+    assert bench._sfm_model(work) == work / "dense" / "sparse"

@@ -598,6 +598,7 @@ def cmd_recon(args) -> None:
         doctor.preflight("recon", skip=("colmap", "brush"))
         (work / "recon_args.json").unlink(missing_ok=True)
         (work / "eval.json").unlink(missing_ok=True)
+        (work / "gps_priors.json").unlink(missing_ok=True)
         t0 = time.perf_counter()
         rules = clean_rules(args, "off")
         dense = visloc.run(work, steps=args.steps, rules=None)

@@ -250,7 +250,7 @@ def capture(viewer_dir: Path, frames: Path, opts: Options) -> list[float]:
             except Exception as e:
                 raise SystemExit(
                     f"the viewer page did not expose window.otrvRender within {API_TIMEOUT_S} s "
-                    "(otrv render needs viewer v2, which loads three.js/Spark from a CDN: check your connection)"
+                    "(otrv render needs viewer v2 with vendored three.js/Spark)"
                     + ("; page errors: " + " | ".join(errors[-3:]) if errors else "")
                 ) from e
             duration = page.evaluate(

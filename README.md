@@ -97,8 +97,7 @@ Every command has `--help` with defaults, units and time costs. `ingest`, `prep`
 quick `doctor` check first and stop with the fix if a tool is missing; errors print one line
 (add `--debug` for the traceback).
 
-**Viewing needs internet.** The viewer loads three.js and Spark from a CDN. Your footage and splat
-stay on your machine; only those libraries are fetched.
+**Viewing works offline.** three.js and Spark are vendored in `viewer/vendor/`, so the viewer makes no external requests unless you turn on the opt-in Esri street map.
 
 Already have footage on another disk? `uv run otrv ingest --src /path/to/TeslaCam`, or keep the
 footage somewhere else entirely with `--data /path` (or `export OTRV_DATA=/path`): ingest, list,
@@ -143,8 +142,8 @@ to the **Gallery**, where you can **Drive** them or **Replay** them.
 
 Everything stays on your Mac. The server listens on 127.0.0.1 only and needs the token in the URL it
 prints. Footage is read in place, and only the clip you build is copied. The studio's pages make no
-external requests. Cities open from a second local server (the next port, no token, its own CSP; the
-replay viewer still loads three.js/Spark from a CDN), so a city page can't reach the studio. See
+external requests. Cities open from a second local server (the next port, no token, its own CSP;
+three.js and Spark are vendored locally), so a city page can't reach the studio. See
 [docs/STUDIO.md](docs/STUDIO.md).
 
 ### Costs
@@ -183,7 +182,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 | `prep` | sample frames, mask the car (and optionally moving objects), write a rig-aware match list (same camera over time + overlapping neighbours) and the approximate rig, decode telemetry, cut the side-panel clips |
 | `recon` | COLMAP features → rig configurator → mapper → undistort → Brush training → prune/dehaze → drive-mode collision grids, plus the trajectory with real-world scale from telemetry speed |
 | `clean` / `collision` | re-run the post-train clean-up or the collision bake without retraining |
-| `view` | local server with byte-range support, so the synced videos can seek (three.js/Spark come from a CDN) |
+| `view` | local server with byte-range support, so the synced videos can seek (offline; vendored three.js/Spark) |
 | `render` | drive the viewer's render mode in headless Chromium, capture splat and overlay layers per frame, optionally clean up with Difix and stabilise, composite, encode H.264; see [docs/RENDER.md](docs/RENDER.md) |
 | `nvs-export` | posed frames + chase-cam target poses for a novel-view diffusion model |
 | `studio` | local web app over all of the above: sources, drives, window picking, a build queue with live progress, gallery ([docs/STUDIO.md](docs/STUDIO.md)) |
@@ -193,7 +192,7 @@ TeslaCam/ ──ingest──▶ index.json ──prep──▶ frames · masks �
 
 ## The viewer
 
-`viewer/` is a static page (`index.html` + `car.js`, three.js and Spark from a CDN). Serve the
+`viewer/` is a static page (`index.html` + `car.js` + vendored three.js and Spark in `viewer/vendor/`). Serve the
 folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open it in a browser.
 
 | Key | Action | Key | Action |
@@ -235,7 +234,7 @@ folder that holds `scene.ply` and `path.json` (`otrv view` does this) and open i
 - 16 GB+ RAM recommended; a 20 s clip uses a few GB of disk in `work/`.
 - Python 3.11+ via [uv](https://docs.astral.sh/uv/), ffmpeg, **COLMAP 4.0+** (rig support), Brush
   v0.3.0 (`otrv setup-brush`, or set `BRUSH=/path/to/brush_app`). `otrv doctor` checks all of it.
-- Internet access to open the viewer (three.js and Spark load from a CDN).
+- No internet needed to view reconstructions (three.js and Spark are vendored; map tiles are opt-in).
 - Telemetry needs Tesla firmware 2025.44.25+ on HW3/HW4. Older clips still reconstruct, just
   without the HUD.
 

@@ -76,15 +76,34 @@ def viewer_file(name: str):
     return source
 
 
+def _copy_traversable(src, dst: Path) -> None:
+    """Copy a Traversable directory (wheel resource or Path) into `dst`."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.iterdir():
+        target = dst / entry.name
+        if entry.is_dir():
+            _copy_traversable(entry, target)
+        else:
+            target.write_bytes(entry.read_bytes())
+
+
 def user_models_dir() -> Path:
     """User-installed car models (never in the repo): $OTRV_MODELS, else ~/.otrv/models."""
     return Path(os.environ.get("OTRV_MODELS", Path.home() / ".otrv" / "models")).expanduser()
 
 
 def install_viewer(vd: Path) -> None:
-    """Copy the viewer page + modules into a served run folder, plus the user's car model if any."""
+    """Copy the viewer page, vendored JS/WASM and modules into a served run folder, plus the user's car model."""
     for name in VIEWER_FILES:
         (vd / name).write_bytes(viewer_file(name).read_bytes())
+    vendor_src = resources.files("tsplat") / "viewer" / "vendor"
+    if not vendor_src.is_dir():
+        vendor_src = ROOT / "viewer" / "vendor"
+    if not vendor_src.is_dir():
+        raise SystemExit("viewer/vendor is missing from this install; reinstall open-tesla-reality-view")
+    vendor_out = vd / "vendor"
+    shutil.rmtree(vendor_out, ignore_errors=True)
+    _copy_traversable(vendor_src, vendor_out)
     out = vd / "models"
     shutil.rmtree(out, ignore_errors=True)
     src = user_models_dir()
@@ -409,7 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("name", help="run name")
     a.add_argument("--fps", type=float, default=10, help="chase-cam target poses per second")
 
-    a = cmd("view", "serve the replay viewer locally and open it (needs internet: three.js/Spark load from a CDN)")
+    a = cmd("view", "serve the replay viewer locally and open it (works offline; vendored three.js/Spark)")
     a.add_argument("name", help="run name")
     a.add_argument("--port", type=int, default=8765, help="local port")
 
@@ -666,7 +685,7 @@ def cmd_view(args) -> None:
         raise
     with srv:
         url = f"http://127.0.0.1:{args.port}/"
-        print(f"viewer: {url}  (ctrl-c to stop; needs internet for three.js/Spark from the CDN)")
+        print(f"viewer: {url}  (ctrl-c to stop; offline except opt-in map tiles)")
         webbrowser.open(url)
         srv.serve_forever()
 

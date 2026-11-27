@@ -44,14 +44,12 @@ CSP = (
     "form-action 'self'; frame-ancestors 'none'"
 )
 # City pages are served by a second server on their own port (a separate origin with no token and no
-# cookie), with their own policy. TODO(viewer, #13): the viewer (viewer/index.html, owned by feat/viewer-v2)
-# imports three.js and Spark from cdn.jsdelivr.net through an inline import map, so this policy allows that
-# CDN and inline scripts; once the viewer vendors those libraries it can drop both.
-CDN = "https://cdn.jsdelivr.net"
+# cookie), with their own policy. three.js and Spark are vendored under viewer/vendor/, so no external
+# script CDN is allowed; only the opt-in Esri street map tiles remain in img-src.
 MAP_TILES = "https://server.arcgisonline.com"
 CITY_CSP = (
-    f"default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: {CDN}; "
-    f"worker-src 'self' blob: data: {CDN}; connect-src 'self' blob: data: {CDN}; "
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; "
+    "worker-src 'self' blob: data:; connect-src 'self' blob: data:; "
     f"img-src 'self' data: blob: {MAP_TILES}; media-src 'self' blob:; "
     "style-src 'self' 'unsafe-inline'; font-src 'self' data:; "
     "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"

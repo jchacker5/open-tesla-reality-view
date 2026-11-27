@@ -41,13 +41,10 @@ shows their status.
   and `Sec-Fetch-Site: same-site` checks).
 - **No external requests.** The studio's pages are plain HTML/CSS/JS with no third-party code and no
   CDN. They are served with `Content-Security-Policy: default-src 'self'` and `frame-ancestors 'none'`,
-  and a test checks that the static files reference no `http(s)://` URLs.
-- **Footage is indexed in place.** Nothing is copied until you press Build. Then only the chosen clip's
-  camera files (about 200 MB, not the drive's 100 GB) are copied to `work/<name>/_src/`, and that copy
-  is deleted when the build succeeds.
-- **Known gap.** The replay viewer (`viewer/index.html`) still loads three.js and Spark from
-  cdn.jsdelivr.net through an inline import map, so `CITY_CSP` allows that CDN, inline scripts and
-  `wasm-unsafe-eval` (Spark). Once the viewer vendors those libraries (issue #13), it can drop them.
+  and a test checks that the static files reference no `http(s)://` URLs. The replay viewer (`viewer/`)
+  vendors three.js and Spark under `viewer/vendor/`, so `CITY_CSP` allows no script CDN (only `'self'`,
+  inline scripts/styles, `blob:`, `'wasm-unsafe-eval'` for Spark, and the opt-in Esri map tiles in
+  `img-src`).
 
 ## How a build runs
 

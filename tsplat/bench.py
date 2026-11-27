@@ -72,6 +72,12 @@ def _sfm_model(work: Path) -> Path:
     """The model recon picked (most registered images) in work/sparse/<n>; it keeps COLMAP's rig files."""
     from .recon import _registered
 
+    rargs = _read_json(work / "recon_args.json")
+    if rargs.get("backend") == "visloc":
+        vis_sparse = work / "dense" / "sparse"
+        if _registered(vis_sparse) or (vis_sparse / "images.txt").is_file():
+            return vis_sparse
+        raise FileNotFoundError(f"no visloc sparse model in {vis_sparse}")
     sparse = work / "sparse"
     models = [d for d in sparse.iterdir() if _registered(d)] if sparse.is_dir() else []
     if not models:

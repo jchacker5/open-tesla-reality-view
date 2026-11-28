@@ -7,6 +7,8 @@ import json
 import shutil
 import struct
 import subprocess
+import sys
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +22,30 @@ from .splats import CAM_HEIGHT_M
 def sh(*args: str) -> None:
     print("$", " ".join(args[:2]), "...")
     subprocess.run(list(args), check=True)
+
+
+# Brush v0.3.0's dataset loader intermittently fails with "IO error while loading dataset: early eof" on a
+# dataset that loads fine on the next attempt (seen on macOS; no file differs between a failed and a good load).
+BRUSH_LOAD_ERROR = "IO error while loading dataset"
+BRUSH_LOAD_ATTEMPTS = 4
+
+
+def run_brush(args: list[str], attempts: int = BRUSH_LOAD_ATTEMPTS) -> None:
+    """Run Brush, streaming its stderr; retry only its intermittent dataset-load failure, so any other
+    error (bad flags, a crash mid-training) still fails on the first attempt."""
+    for attempt in range(1, attempts + 1):
+        print("$", " ".join(args[:2]), "...", flush=True)
+        p = subprocess.Popen(args, stderr=subprocess.PIPE, text=True, errors="replace")
+        tail: deque[str] = deque(maxlen=50)
+        for line in p.stderr:
+            sys.stderr.write(line)
+            tail.append(line)
+        if p.wait() == 0:
+            return
+        if attempt < attempts and BRUSH_LOAD_ERROR in "".join(tail):
+            print(f"Brush failed to load the dataset (an intermittent Brush error); retry {attempt}/{attempts - 1}")
+            continue
+        raise subprocess.CalledProcessError(p.returncode, args)
 
 
 def _registered(model: Path) -> int:
@@ -300,7 +326,7 @@ def train(
         "--total-steps",
         str(steps),
         "--export-path",
-        str(out),
+        str(out.resolve()),  # absolute: Brush 1.x resolves a relative one against the dataset's parent
         "--export-every",
         str(export_every(steps)),
         "--export-name",
@@ -314,7 +340,7 @@ def train(
     args, dropped = brush.adapt_args(args, brush.cli_flags(args[0]))  # v0.3.0 flags -> this Brush's
     if dropped:
         print(f"note: this Brush has no {', '.join(dropped)}; training without them")
-    sh(*args)
+    run_brush(args)
     final = out / f"splat_{steps}.ply"
     if not final.exists():
         found = sorted(p.name for p in out.glob("splat_*.ply"))

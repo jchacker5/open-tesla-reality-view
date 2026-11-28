@@ -1,6 +1,8 @@
 import json
 import struct
+import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -165,6 +167,16 @@ a = sys.argv[1:]
 val = lambda k: a[a.index(k) + 1]
 steps, every, out = int(val("--total-steps")), int(val("--export-every")), Path(val("--export-path"))
 mode = os.environ.get("FAKE_BRUSH_MODE", "ok")
+(out.parent / "brush_argv.txt").write_text("\\n".join(a))
+if mode.startswith("flaky"):  # fail to load N times, like Brush v0.3.0's intermittent loader error
+    n, count = int(mode.split(":")[1]), out.parent / "brush_calls"
+    calls = int(count.read_text()) + 1 if count.exists() else 1
+    count.write_text(str(calls))
+    if calls <= n:
+        sys.exit("Error: Failed to load format.\\nCaused by:\\n  0: IO error while loading dataset.\\n  1: early eof")
+    mode = "ok"
+if mode == "broken":
+    sys.exit("Error: unexpected argument '--bogus' found")
 if mode == "nothing":
     sys.exit(0)
 last = steps if mode == "ok" else steps // 2
@@ -215,6 +227,38 @@ def test_train_fails_clearly_when_final_splat_missing(fake_brush, monkeypatch):
     with pytest.raises(SystemExit, match="splat_8000.ply"):
         recon.train(fake_brush, fake_brush / "dense", 8000, viewer=False)
     assert not (fake_brush / "viewer" / "scene.ply").exists()
+
+
+def test_train_retries_brush_intermittent_dataset_load_error(fake_brush, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BRUSH_MODE", "flaky:2")
+    dest = recon.train(fake_brush, fake_brush / "dense", 8000, viewer=False)
+    assert dest.read_text() == "ply 8000"
+    assert (fake_brush / "brush_calls").read_text() == "3"
+    assert capsys.readouterr().out.count("Brush failed to load the dataset") == 2
+
+
+def test_train_gives_up_after_repeated_load_errors(fake_brush, monkeypatch):
+    monkeypatch.setenv("FAKE_BRUSH_MODE", "flaky:99")
+    with pytest.raises(subprocess.CalledProcessError):
+        recon.train(fake_brush, fake_brush / "dense", 8000, viewer=False)
+    assert (fake_brush / "brush_calls").read_text() == str(recon.BRUSH_LOAD_ATTEMPTS)
+
+
+def test_train_does_not_retry_other_brush_errors(fake_brush, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_BRUSH_MODE", "broken")
+    with pytest.raises(subprocess.CalledProcessError):
+        recon.train(fake_brush, fake_brush / "dense", 8000, viewer=False)
+    assert "Brush failed to load the dataset" not in capsys.readouterr().out
+
+
+def test_train_passes_brush_an_absolute_export_path(fake_brush, monkeypatch):
+    """Brush 1.x resolves a relative --export-path against the dataset's parent, so `work/x/splat` ended up in
+    work/x/work/x/splat and recon reported that Brush exported nothing."""
+    monkeypatch.chdir(fake_brush.parent)
+    recon.train(Path(fake_brush.name), Path(fake_brush.name) / "dense", 8000, viewer=False)
+    argv = (fake_brush / "brush_argv.txt").read_text().split("\n")
+    export = Path(argv[argv.index("--export-path") + 1])
+    assert export.is_absolute() and export == (fake_brush / "splat").resolve()
 
 
 def test_path_smoothing_keeps_ends_in_place():

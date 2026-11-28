@@ -12,6 +12,13 @@ All notable changes to this project are documented here. The format follows
 - `otrv render --enhance` failed at model load after a Dependabot bump of `peft` (0.9.0 -> 0.22.0,
   which needs transformers 5.6+). The Difix pins are restored, Dependabot ignores them, and a test
   guards them.
+- `otrv recon` stopped at random with Brush's "IO error while loading dataset: early eof", even
+  though the same dataset loads fine on the next try. It now retries that load error (up to 3
+  times). Any other Brush error still stops the run straight away.
+- With a source-built Brush 1.x (`otrv setup-brush --from-source`), `otrv recon` trained and then
+  reported "Brush exported nothing". Brush 1.x resolves a relative `--export-path` against the
+  dataset's parent folder, so the splat landed in `work/<name>/work/<name>/splat`. recon now passes
+  an absolute path.
 
 ## [0.1.0] - 2026-11-23
 
